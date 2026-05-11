@@ -17,6 +17,7 @@ class TravelState(TypedDict, total=False):
     intent: str
     city: str
     days: int
+    start_date: str
     preference: str
     raw_materials: str
     missing_fields: list[str]

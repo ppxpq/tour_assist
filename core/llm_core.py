@@ -38,7 +38,16 @@ def get_llm(model_name):
             temperature=0.1
         )
     
-    # 2. 阿里云通义千问 qwen 系列（新增）
+    # 2. MiMo 系列
+    elif "mimo" in model_lower:
+        return ChatOpenAI(
+            model=model_name,
+            api_key=config.MIMO_API_KEY,
+            base_url=config.MIMO_BASE_URL,
+            temperature=0.1,
+        )
+
+    # 3. 阿里云通义千问 qwen 系列（新增）
     elif "qwen" in model_lower:
         return ChatOpenAI(
             model=model_name,
@@ -47,7 +56,7 @@ def get_llm(model_name):
             temperature=0.1
         )
     
-    # 3. Gemini / Claude 等代理模型
+    # 4. Gemini / Claude 等代理模型
     else:
         return ChatGoogleGenerativeAI(
             model=model_name,

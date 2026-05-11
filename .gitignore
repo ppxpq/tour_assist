@@ -1,0 +1,25 @@
+# Local secrets
+api_key.env
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime data
+data/chroma_db/
+data/uploads/
+*.sqlite3
+
+# Local tooling and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

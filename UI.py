@@ -167,6 +167,7 @@ def render_sidebar(config):
             new_name = f"新会话{st.session_state.session_counter}"
             st.session_state.sessions[new_name] = []
             st.session_state.current_session = new_name
+            st.session_state.needs_save = True
             st.rerun()
 
         session_names = list(st.session_state.sessions.keys())

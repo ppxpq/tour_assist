@@ -1,14 +1,18 @@
 import hashlib
+import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
 
 from agents.state import TravelState, human_texts
+from core.llm_core import get_llm
 from core.tools import (
     get_current_location,
     get_route_distance,
+    get_travel_tools,
     get_weather,
     get_weather_forecast,
     recognize_scenic_spot,
@@ -438,32 +442,279 @@ def _research_for_answer(
     return "\n\n".join(sections).strip()
 
 
+def _parse_structured_materials(raw: str) -> dict:
+    """尝试从 raw_materials 中解析 JSON 结构。"""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+# ─── 研究节点：LLM 工具调用（need_plan）───
+
+_RESEARCHER_SYSTEM = """你是一个旅游信息搜集助手。你的任务是：
+1. 根据用户需求，自主决定调用哪些工具来搜集信息
+2. 尽量并行搜集天气、景点、餐饮、路线等信息
+3. 搜集完毕后，将所有信息整合为结构化 JSON 输出
+
+【输出格式】
+最终回复必须是如下 JSON 结构（不要包裹在 markdown 代码块中）：
+{
+  "weather": "天气信息摘要",
+  "scenic_spots": "景点推荐摘要",
+  "restaurants": "餐饮推荐摘要",
+  "route_info": "路线与交通摘要",
+  "knowledge_base": "知识库参考摘要（如有）"
+}
+
+每个字段的值应是结构化的文字摘要，而非原始 API 返回。如果没有相关信息，填空字符串。"""
+
+_RESEARCHER_ANSWER_SYSTEM = """You are a travel research assistant for direct Q&A.
+Use the bound tools to research the user's current question instead of relying on keyword rules.
+When a tool can answer or verify the question, call it first. You may call multiple tools before answering.
+If the question asks about uploaded documents, user profile, preferences, notes, or the local knowledge base,
+use the search_knowledge_base tool.
+After tools finish, answer the user directly in the user's language. Do not output JSON in direct-answer mode.
+"""
+
+
+def _make_knowledge_base_tool(vector_db: Any, city: str, days: int, preference: str):
+    @tool
+    def search_knowledge_base(query: str) -> str:
+        """Search uploaded/local knowledge base for relevant travel notes, preferences, and documents."""
+        return _search_knowledge_base(
+            vector_db,
+            query=query,
+            city=city,
+            days=days,
+            preference=preference,
+            k=4,
+        )
+
+    return search_knowledge_base
+
+
+def _format_recent_history(messages: Optional[list[BaseMessage]]) -> str:
+    if not messages:
+        return ""
+
+    lines: list[str] = []
+    for msg in messages[-6:]:
+        content = str(getattr(msg, "content", "") or "").strip()
+        if not content:
+            continue
+        if isinstance(msg, HumanMessage):
+            role = "User"
+        elif isinstance(msg, AIMessage):
+            role = "Assistant"
+        else:
+            role = "Message"
+        lines.append(f"[{role}] {content}")
+    return "\n".join(lines)
+
+
+def _build_research_user_message(
+    *,
+    intent: str,
+    city: str,
+    days: int,
+    start_date: str,
+    preference: str,
+    query: str,
+    messages: Optional[list[BaseMessage]],
+) -> str:
+    history = _format_recent_history(messages)
+    common_context = (
+        f"Current user request: {query}\n"
+        f"Router intent: {intent or 'unknown'}\n"
+        f"Router city: {city or 'unknown'}\n"
+        f"Trip days: {days if days > 0 else 'unknown'}\n"
+        f"Start date: {start_date or 'unknown'}\n"
+        f"Preference: {preference or 'unknown'}\n"
+        f"Recent conversation:\n{history or '(none)'}\n\n"
+    )
+
+    if intent != "need_plan":
+        return (
+            common_context
+            + "Research this as a direct travel Q&A task. Let the LLM decide which bound tools to call. "
+            + "Use search_knowledge_base for uploaded documents, profile, preferences, notes, or RAG questions. "
+            + "Use weather, route, location, scenic spot, restaurant, image, or audio tools when they match the request. "
+            + "Then answer directly."
+        )
+
+    return (
+        common_context
+        + "Research this as trip-planning material. Let the LLM decide which bound tools to call, including "
+        + "search_knowledge_base when local documents or preferences are useful. Final output must be strict JSON "
+        + "with keys: weather, scenic_spots, restaurants, route_info, knowledge_base."
+    )
+
+
+def _research_with_llm(
+    city: str,
+    days: int,
+    start_date: str,
+    preference: str,
+    query: str,
+    vector_db: Any,
+    intent: str = "need_plan",
+    messages: Optional[list[BaseMessage]] = None,
+) -> dict:
+    """使用 LLM 工具调用搜集旅行信息，返回结构化结果。"""
+    tools = [*get_travel_tools(), _make_knowledge_base_tool(vector_db, city, days, preference)]
+    tool_map = {t.name: t for t in tools}
+    llm = get_llm("mimo-v2.5-pro").bind_tools(tools)
+    normalized_intent = (intent or "need_plan").strip().lower()
+    direct_answer_mode = normalized_intent != "need_plan"
+    system_prompt = _RESEARCHER_ANSWER_SYSTEM if direct_answer_mode else _RESEARCHER_SYSTEM
+
+    user_msg = _build_research_user_message(
+        intent=normalized_intent,
+        city=city,
+        days=days,
+        start_date=start_date,
+        preference=preference,
+        query=query,
+        messages=messages,
+    )
+    msgs: list[BaseMessage] = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_msg),
+    ]
+    called_tool_names: set[str] = set()
+
+    for _ in range(10):
+        resp = llm.invoke(msgs)
+        msgs.append(resp)
+
+        tool_calls = resp.tool_calls or []
+        if not tool_calls:
+            break
+
+        # 并行执行所有工具调用
+        results_map: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            future_to_id = {}
+            for tc in tool_calls:
+                tc_name = tc.get("name", "")
+                tc_id = tc.get("id", "")
+                called_tool_names.add(tc_name)
+                if tc_name not in tool_map:
+                    results_map[tc_id] = f"未知工具：{tc_name}"
+                    continue
+                future_to_id[pool.submit(
+                    _safe_tool_invoke, tool_map[tc_name], tc.get("args", {})
+                )] = tc_id
+
+            for future in as_completed(future_to_id):
+                tc_id = future_to_id[future]
+                try:
+                    results_map[tc_id] = future.result()
+                except Exception as exc:
+                    results_map[tc_id] = f"工具执行异常：{exc}"
+
+        for tc in tool_calls:
+            tc_id = tc.get("id", "")
+            result_text = results_map.get(tc_id, "工具执行失败")
+            msgs.append(ToolMessage(content=result_text, tool_call_id=tc_id))
+
+    kb_text = ""
+    if not direct_answer_mode and "search_knowledge_base" not in called_tool_names:
+        kb_text = _search_knowledge_base(
+            vector_db,
+            query=query,
+            city=city,
+            days=days,
+            preference=preference,
+            k=4,
+        )
+
+    # 解析 LLM 输出的 JSON
+    final_content = getattr(msgs[-1], "content", "") if msgs else ""
+    if direct_answer_mode:
+        answer_text = final_content.strip() or "No usable research result was returned; please try again."
+        return {
+            "raw_materials": answer_text,
+            "messages": [AIMessage(content=answer_text)],
+        }
+
+    parsed = _parse_structured_materials(final_content)
+    if parsed:
+        if kb_text and not (parsed.get("knowledge_base") or "").strip():
+            parsed["knowledge_base"] = kb_text
+        raw_materials = json.dumps(parsed, ensure_ascii=False, indent=2)
+    else:
+        raw_materials = final_content
+        if kb_text:
+            raw_materials = f"{raw_materials}\n\n{kb_text}".strip()
+
+    return {
+        "raw_materials": raw_materials,
+        "messages": [AIMessage(content=f"已完成资料搜集（{len(raw_materials)} 字符）。")],
+    }
+
+
+# ─── 研究节点主入口 ───
+
 def researcher_agent(state: TravelState) -> dict:
     intent = (state.get("intent") or "").strip().lower()
     query = (state.get("user_query") or "").strip()
     city = (state.get("city") or "").strip()
     days = int(state.get("days") or 0)
+    start_date = (state.get("start_date") or "").strip()
     preference = (state.get("preference") or "综合").strip()
     vector_db = state.get("vector_db")
     messages: list[BaseMessage] = list(state.get("messages", []))
 
-    if intent == "need_answer":
-        answer_text = _research_for_answer(
-            query=query,
-            messages=messages,
-            router_city=city,
-            days=days,
-            preference=preference,
-            vector_db=vector_db,
-        )
-        return {
-            "raw_materials": answer_text,
-            "messages": [AIMessage(content=_format_answer_message(query, answer_text))],
-        }
-
-    if not city:
+    # Researcher always uses LLM tool-calling on its main path; old deterministic
+    # answer research is kept only as a failure fallback.
+    if intent == "need_plan" and not city:
         return {"raw_materials": "【资料采集失败】缺少目的地城市，无法执行天气、景点和美食检索。"}
 
+    try:
+        return _research_with_llm(
+            city=city,
+            days=days,
+            start_date=start_date,
+            preference=preference,
+            query=query,
+            vector_db=vector_db,
+            intent=intent,
+            messages=messages,
+        )
+    except Exception as exc:
+        if intent != "need_plan":
+            answer_text = _research_for_answer(
+                query=query,
+                messages=messages,
+                router_city=city,
+                days=days,
+                preference=preference,
+                vector_db=vector_db,
+            )
+            return {
+                "raw_materials": f"LLM tool-calling failed and fell back: {exc}\n\n{answer_text}",
+                "messages": [AIMessage(content=_format_answer_message(query, answer_text))],
+            }
+
+        # LLM 工具调用失败时，回退到原有并行搜集逻辑
+        return _research_fallback(city, days, preference, query, vector_db, str(exc))
+
+
+def _research_fallback(
+    city: str,
+    days: int,
+    preference: str,
+    query: str,
+    vector_db: Any,
+    error_hint: str = "",
+) -> dict:
+    """LLM 工具调用失败时的回退逻辑：并行搜集 + 原始文本拼接。"""
     scenic_keyword = _pick_scenic_keyword(preference)
     food_keyword = _pick_food_keyword(preference)
 
@@ -490,17 +741,13 @@ def researcher_agent(state: TravelState) -> dict:
                 results[key] = f"并发任务 {key} 执行失败：{exc}"
 
     kb_text = _search_knowledge_base(
-        vector_db,
-        query=query,
-        city=city,
-        days=days,
-        preference=preference,
-        k=4,
+        vector_db, query=query, city=city, days=days, preference=preference, k=4,
     )
     transport_hint = _build_transport_hint(results["scenic"], days)
 
+    fallback_note = f"（LLM 工具调用失败已回退：{error_hint}）" if error_hint else ""
     gathered_info = (
-        f"【资料采集摘要】\n"
+        f"【资料采集摘要】{fallback_note}\n"
         f"目的地：{city}\n"
         f"天数：{days if days > 0 else '未指定'}\n"
         f"偏好：{preference}\n\n"

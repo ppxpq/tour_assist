@@ -74,6 +74,15 @@ def _get_ali_client() -> OpenAI:
     )
 
 
+@lru_cache(maxsize=1)
+def _get_mimo_client() -> OpenAI:
+    """MiMo OpenAI 兼容客户端单例（MiMo-V2-Omni 多模态）。"""
+    return OpenAI(
+        api_key=config.MIMO_API_KEY,
+        base_url=config.MIMO_BASE_URL,
+    )
+
+
 def _to_base64(file_input: str) -> tuple[str, str]:
     """
     统一处理文件输入：本地路径 → base64 编码；已是 base64 → 直接透传。
@@ -375,10 +384,10 @@ def speech_to_text(audio_input: str) -> str:
         path = tmp_path = Path(tmp.name)
 
     try:
-        client = _get_ali_client()
+        client = _get_mimo_client()
         with open(path, "rb") as f:
             transcript = client.audio.transcriptions.create(
-                model="qwen-audio-turbo",
+                model="mimo-v2-omni",
                 file=f,
                 response_format="text",
             )
@@ -422,9 +431,9 @@ def recognize_scenic_spot(
 门票参考：<价格或免费>"""
 
     try:
-        client = _get_ali_client()
+        client = _get_mimo_client()
         resp = client.chat.completions.create(
-            model="qwen-vl-max",
+            model="mimo-v2-omni",
             messages=[{
                 "role": "user",
                 "content": [

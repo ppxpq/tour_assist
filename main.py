@@ -1,6 +1,8 @@
 ﻿
 import time
-import tempfile
+import re
+import uuid
+import json
 from pathlib import Path
 from typing import Any
 
@@ -42,22 +44,58 @@ STATUS_COLOR = {
     "skipped": "#CBD5E1",
     "failed": "#FCA5A5",
 }
+MEDIA_PATH_RE = re.compile(
+    r"路径[:：]\s*([^\n，,]+?\.(?:jpg|jpeg|png|webp|bmp|gif|mp3|wav|m4a|ogg|webm|flac|aac))",
+    re.IGNORECASE,
+)
 
 
-def save_to_temp(uploaded_file) -> str:
-    """把 Streamlit UploadedFile 存成临时文件，返回路径字符串。"""
+def save_to_upload_store(uploaded_file) -> str:
+    """把 Streamlit UploadedFile 存到受管上传目录，返回路径字符串。"""
     suffix = Path(uploaded_file.name).suffix or ".bin"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(uploaded_file.getvalue())
-        return tmp.name
+    upload_dir = Path(config.UPLOAD_DIR)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{int(time.time())}_{uuid.uuid4().hex}{suffix.lower()}"
+    saved_path = upload_dir / filename
+    saved_path.write_bytes(uploaded_file.getvalue())
+    return str(saved_path)
 
 
-def cleanup_temp_files(paths: list[str]) -> None:
+def is_managed_upload_path(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(Path(config.UPLOAD_DIR).resolve())
+        return True
+    except Exception:
+        return False
+
+
+def cleanup_unmanaged_temp_files(paths: list[str]) -> None:
+    """清理非受管临时文件；受管上传文件保留到会话清理时删除。"""
     for path in paths:
         try:
-            Path(path).unlink(missing_ok=True)
+            file_path = Path(path)
+            if not is_managed_upload_path(file_path):
+                file_path.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def cleanup_session_media(messages: list[dict[str, str]]) -> None:
+    """删除当前会话历史中引用的受管上传文件。"""
+    seen: set[str] = set()
+    for msg in messages:
+        content = msg.get("content", "")
+        for match in MEDIA_PATH_RE.finditer(content):
+            media_path = match.group(1).strip().strip("'\"")
+            if media_path in seen:
+                continue
+            seen.add(media_path)
+            path = Path(media_path)
+            try:
+                if is_managed_upload_path(path):
+                    path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def rename_current_session(prompt: str):
@@ -85,6 +123,7 @@ def rename_current_session(prompt: str):
     renamed = {(unique if k == old else k): v for k, v in st.session_state.sessions.items()}
     st.session_state.sessions = renamed
     st.session_state.current_session = unique
+    save_sessions()
     st.rerun()
 
 
@@ -369,16 +408,45 @@ def run_travel_graph(
 # ──────────────────────────────────────────────
 # 初始化
 # ──────────────────────────────────────────────
+SESSION_STORE_FILE = Path(config.BASE_DIR) / "data" / "sessions.json"
+
+def load_sessions():
+    if SESSION_STORE_FILE.exists():
+        try:
+            with open(SESSION_STORE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("sessions", {}), data.get("current_session", ""), data.get("session_counter", 1)
+        except Exception:
+            pass
+    return None, None, None
+
+def save_sessions():
+    try:
+        SESSION_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "sessions": st.session_state.sessions,
+            "current_session": st.session_state.current_session,
+            "session_counter": st.session_state.session_counter
+        }
+        with open(SESSION_STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Failed to save sessions: {e}")
+
 config.init_env()
 render_page_title()
 
-if "session_counter" not in st.session_state:
-    st.session_state.session_counter = 1
 if "sessions" not in st.session_state:
-    name = f"新会话{st.session_state.session_counter}"
-    st.session_state.sessions = {name: []}
-if "current_session" not in st.session_state:
-    st.session_state.current_session = list(st.session_state.sessions.keys())[0]
+    saved_sessions, saved_current, saved_counter = load_sessions()
+    if saved_sessions:
+        st.session_state.sessions = saved_sessions
+        st.session_state.current_session = saved_current or list(saved_sessions.keys())[0]
+        st.session_state.session_counter = saved_counter or len(saved_sessions)
+    else:
+        st.session_state.session_counter = 1
+        name = f"新会话{st.session_state.session_counter}"
+        st.session_state.sessions = {name: []}
+        st.session_state.current_session = name
 if "vector_db" not in st.session_state:
     st.session_state.vector_db = load_db()
 if "current_model" not in st.session_state:
@@ -389,6 +457,10 @@ if "kb_notice" not in st.session_state:
     st.session_state.kb_notice = None
 if "node_run_history" not in st.session_state:
     st.session_state.node_run_history = []
+
+if st.session_state.get("needs_save", False):
+    save_sessions()
+    st.session_state.needs_save = False
 
 current_messages = st.session_state.sessions[st.session_state.current_session]
 
@@ -410,15 +482,19 @@ if selected_session != st.session_state.current_session:
     st.rerun()
 
 if clear_clicked:
+    cleanup_session_media(st.session_state.sessions[st.session_state.current_session])
     st.session_state.sessions[st.session_state.current_session] = []
+    save_sessions()
     st.rerun()
 
 if delete_clicked:
+    cleanup_session_media(st.session_state.sessions[st.session_state.current_session])
     if len(st.session_state.sessions) > 1:
         del st.session_state.sessions[st.session_state.current_session]
         st.session_state.current_session = list(st.session_state.sessions.keys())[0]
     else:
         st.session_state.sessions[st.session_state.current_session] = []
+    save_sessions()
     st.rerun()
 
 if uploaded_files and ingest_clicked:
@@ -453,7 +529,7 @@ if not supports_upload:
 # ──────────────────────────────────────────────
 if submission:
     prompt = ""
-    temp_paths: list[str] = []
+    media_paths: list[str] = []
     try:
         prompt, files, recorded_audio = parse_chat_submission(submission)
         imgs   = [f for f in files if is_image_file(f)]
@@ -467,19 +543,19 @@ if submission:
 
         img = imgs[0] if imgs else None
 
-        # ── 把文件写入临时路径，交给 Agent 工具处理 ──────
+        # ── 把文件写入受管上传路径，交给 Agent 工具处理 ──────
         media_hints = []
 
         if img:
-            img_path = save_to_temp(img)
-            temp_paths.append(img_path)
+            img_path = save_to_upload_store(img)
+            media_paths.append(img_path)
             media_hints.append(f"用户上传了一张图片，路径：{img_path}，请识别图中景点并介绍。")
             st.image(img, width=300)             # UI 展示
 
         if audios:
             for a in audios:
-                audio_path = save_to_temp(a)
-                temp_paths.append(audio_path)
+                audio_path = save_to_upload_store(a)
+                media_paths.append(audio_path)
                 media_hints.append(f"用户上传了语音文件，路径：{audio_path}，请先转文字再处理。")
                 st.audio(a)                      # UI 展示
 
@@ -495,6 +571,7 @@ if submission:
         st.session_state.sessions[st.session_state.current_session].append(
             {"role": "user", "content": prompt}
         )
+        save_sessions()
         st.chat_message("user").write(prompt)
 
         # ── AI 回复 ────────────────────────────────────
@@ -502,6 +579,7 @@ if submission:
             {"role": "assistant", "content": ""}
         )
         ai_idx = len(st.session_state.sessions[st.session_state.current_session]) - 1
+        save_sessions()
 
         with st.chat_message("assistant"):
             answer_placeholder = st.empty()
@@ -527,13 +605,14 @@ if submission:
                         "at": time.strftime("%H:%M:%S"),
                     }
                 )
-                st.session_state.node_run_history = st.session_state.node_run_history[-30:]
-
+                st.session_state.node_run_history = st.session_state.node_run_history[-30:]                
+                save_sessions()
             except Exception as exc:
                 answer_placeholder.error(f"出错：{exc}")
                 st.session_state.sessions[st.session_state.current_session][ai_idx]["content"] += "\n\n(出错)"
+                save_sessions()
     finally:
-        cleanup_temp_files(temp_paths)
+        cleanup_unmanaged_temp_files(media_paths)
 
     if prompt:
         rename_current_session(prompt)
