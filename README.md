@@ -52,7 +52,7 @@ tour/
 ├─ main.py              # Streamlit 入口
 ├─ UI.py                # UI 组件与样式
 ├─ api_key.env.example  # 密钥配置模板
-├─ api_key.env          # 本地密钥配置（已在 .gitignore 中忽略）
+├─ api_key.env          # 本地密钥配置
 ├─ requirements.txt     # 依赖列表
 └─ README.md
 ```

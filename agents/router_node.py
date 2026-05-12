@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -21,17 +22,17 @@ MISSING_FIELD_LABELS: dict[str, str] = {
     "preference": "旅行偏好（如美食 / 自然 / 人文 / 亲子 / 摄影 / 休闲）",
 }
 
-CLASSIFY_SYSTEM = """你是旅游助手的路由模块。
-请根据对话历史返回一个 JSON 对象，字段如下：
+CLASSIFY_SYSTEM_TEMPLATE = """你是旅游助手的路由模块。
+今天是 {today}。请根据对话历史返回一个 JSON 对象，字段如下：
 
-{
+{{
   "intent": "need_plan | need_more_info | need_answer | general_chat | other",
   "city": "目的地城市名，没有则为空字符串",
   "days": 0,  // 旅行天数，注意区分"玩x天"(days=x)和"y天后出发"(days=0，这是出发时间不是行程天数)
-  "start_date": "出发日期，格式为 YYYY-MM-DD，没有则为空字符串。如用户说"5月20号出发"则填"2026-05-20"，说"下周一"则推算具体日期",
+  "start_date": "出发日期，格式为 YYYY-MM-DD，没有则为空字符串。如用户说"5月20号出发"则填"{year}-05-20"，说"下周一"则根据今天日期推算具体日期",
   "preference": "旅行偏好，多个用 + 连接，没有则为空字符串",
   "reason": "一句话说明判断依据"
-}
+}}
 
 意图定义：
 - need_plan: 用户明确要你生成旅游计划/攻略/行程，并且信息基本齐全
@@ -43,6 +44,14 @@ CLASSIFY_SYSTEM = """你是旅游助手的路由模块。
 如果用户是在问"我的偏好是什么""知识库里写了什么""根据我上传的资料回答"等，这属于 need_answer，不属于 need_plan。
 
 只输出 JSON，不要输出额外说明。"""
+
+
+def _get_classify_system() -> str:
+    now = datetime.now()
+    return CLASSIFY_SYSTEM_TEMPLATE.format(
+        today=now.strftime("%Y年%m月%d日"),
+        year=now.strftime("%Y"),
+    )
 
 
 def _missing_fields(city: str, days: int, start_date: str, preference: str) -> list[str]:
@@ -139,7 +148,7 @@ def router_agent(state: TravelState) -> dict:
     try:
         response = llm.invoke(
             [
-                SystemMessage(content=CLASSIFY_SYSTEM),
+                SystemMessage(content=_get_classify_system()),
                 HumanMessage(content=context_for_llm),
             ]
         )

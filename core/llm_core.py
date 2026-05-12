@@ -55,8 +55,20 @@ def get_llm(model_name):
             base_url=config.ALI_BASE_URL,
             temperature=0.1
         )
-    
-    # 4. Gemini / Claude 等代理模型
+
+    # 4. Claude 系列（通过 OpenAI 兼容代理）
+    elif "claude" in model_lower:
+        # thinking 模型不支持自定义 temperature，必须用默认值 1
+        kwargs = dict(
+            model=model_name,
+            api_key=config.CLAUDE_API_KEY,
+            base_url=config.CLAUDE_BASE_URL,
+        )
+        if "thinking" not in model_lower:
+            kwargs["temperature"] = 0.1
+        return ChatOpenAI(**kwargs)
+
+    # 5. Gemini 等其他代理模型
     else:
         return ChatGoogleGenerativeAI(
             model=model_name,
@@ -73,6 +85,7 @@ def create_rag_chain(vector_db, llm):
         search_type="mmr",
         search_kwargs={"k": 8, "fetch_k": 30}
     )
+    
 
     # 2. 历史感知 Prompt (Pro 级优化)
     history_system_prompt = (

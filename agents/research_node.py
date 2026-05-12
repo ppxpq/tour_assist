@@ -22,6 +22,17 @@ from core.tools import (
 )
 
 
+TOOL_FAILURE_POLICY: dict[str, str] = {
+    "get_weather": "strict",
+    "get_weather_forecast": "strict",
+    "get_current_location": "strict",
+    "get_route_distance": "strict",
+    "speech_to_text": "strict",
+    "recognize_scenic_spot": "strict",
+    "search_scenic_spot": "soft",
+    "search_restaurant": "soft",
+}
+
 CURRENT_LOCATION_HINTS = (
     "我现在在哪里",
     "我在哪",
@@ -48,12 +59,23 @@ CITY_PATTERNS = [
 ]
 
 
-def _safe_tool_invoke(tool_obj, payload: dict) -> str:
+def _safe_tool_invoke(tool_obj, payload: dict, failures: list[dict] | None = None) -> str:
+    tool_name = tool_obj.name
+    policy = TOOL_FAILURE_POLICY.get(tool_name, "strict")
     try:
         output = tool_obj.invoke(payload)
-        return (output or "").strip()
+        result = (output or "").strip()
+        # 将明显的失败返回也视为工具失败
+        if result and any(kw in result for kw in ("失败", "无法", "未能", "请稍后重试", "请确认")):
+            if failures is not None:
+                failures.append({"tool": tool_name, "type": policy, "error": result})
+            return result
+        return result
     except Exception as exc:
-        return f"工具 {tool_obj.name} 调用失败：{exc}"
+        error_msg = f"工具 {tool_name} 调用失败：{exc}"
+        if failures is not None:
+            failures.append({"tool": tool_name, "type": policy, "error": str(exc)})
+        return error_msg
 
 
 def _pick_scenic_keyword(preference: str) -> str:
@@ -587,6 +609,7 @@ def _research_with_llm(
         HumanMessage(content=user_msg),
     ]
     called_tool_names: set[str] = set()
+    tool_failures: list[dict] = []
 
     for _ in range(10):
         resp = llm.invoke(msgs)
@@ -608,7 +631,7 @@ def _research_with_llm(
                     results_map[tc_id] = f"未知工具：{tc_name}"
                     continue
                 future_to_id[pool.submit(
-                    _safe_tool_invoke, tool_map[tc_name], tc.get("args", {})
+                    _safe_tool_invoke, tool_map[tc_name], tc.get("args", {}), tool_failures
                 )] = tc_id
 
             for future in as_completed(future_to_id):
@@ -616,6 +639,9 @@ def _research_with_llm(
                 try:
                     results_map[tc_id] = future.result()
                 except Exception as exc:
+                    tc_name_next = next((t.get("name", "") for t in tool_calls if t.get("id") == tc_id), "")
+                    policy = TOOL_FAILURE_POLICY.get(tc_name_next, "strict")
+                    tool_failures.append({"tool": tc_name_next, "type": policy, "error": str(exc)})
                     results_map[tc_id] = f"工具执行异常：{exc}"
 
         for tc in tool_calls:
@@ -640,6 +666,7 @@ def _research_with_llm(
         answer_text = final_content.strip() or "No usable research result was returned; please try again."
         return {
             "raw_materials": answer_text,
+            "tool_failures": tool_failures,
             "messages": [AIMessage(content=answer_text)],
         }
 
@@ -655,6 +682,7 @@ def _research_with_llm(
 
     return {
         "raw_materials": raw_materials,
+        "tool_failures": tool_failures,
         "messages": [AIMessage(content=f"已完成资料搜集（{len(raw_materials)} 字符）。")],
     }
 
@@ -699,6 +727,7 @@ def researcher_agent(state: TravelState) -> dict:
             )
             return {
                 "raw_materials": f"LLM tool-calling failed and fell back: {exc}\n\n{answer_text}",
+                "tool_failures": [],
                 "messages": [AIMessage(content=_format_answer_message(query, answer_text))],
             }
 
@@ -728,9 +757,10 @@ def _research_fallback(
     }
 
     results: dict[str, str] = {key: "" for key in tasks}
+    tool_failures: list[dict] = []
     with ThreadPoolExecutor(max_workers=5) as pool:
         future_map = {
-            pool.submit(_safe_tool_invoke, tool_obj, payload): key
+            pool.submit(_safe_tool_invoke, tool_obj, payload, tool_failures): key
             for key, (tool_obj, payload) in tasks.items()
         }
         for future in as_completed(future_map):
@@ -738,6 +768,9 @@ def _research_fallback(
             try:
                 results[key] = future.result()
             except Exception as exc:
+                tool_obj = tasks[key][0]
+                policy = TOOL_FAILURE_POLICY.get(tool_obj.name, "strict")
+                tool_failures.append({"tool": tool_obj.name, "type": policy, "error": str(exc)})
                 results[key] = f"并发任务 {key} 执行失败：{exc}"
 
     kb_text = _search_knowledge_base(
@@ -760,4 +793,4 @@ def _research_fallback(
         f"【市内交通建议】\n{transport_hint}\n\n"
         f"{kb_text}"
     )
-    return {"raw_materials": gathered_info.strip()}
+    return {"raw_materials": gathered_info.strip(), "tool_failures": tool_failures}

@@ -32,6 +32,10 @@ ALI_BASE_URL = os.getenv("ALI_BASE_URL", "https://dashscope.aliyuncs.com/compati
 MIMO_API_KEY = os.getenv("MIMO_API_KEY")
 MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
 
+# --- Claude 代理配置 ---
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "sk-f040701f1a944bb8b239ad5ac096ef78")
+CLAUDE_BASE_URL = os.getenv("CLAUDE_BASE_URL", "http://127.0.0.1:8045/v1")
+
 # --- 模型列表 ---
 MODEL_LIST = [
     "glm-4.5-air",

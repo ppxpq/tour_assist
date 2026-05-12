@@ -26,4 +26,5 @@ class TravelState(TypedDict, total=False):
     planner_model: str
     user_query: str
     vector_db: Any
+    tool_failures: list[dict]
     
