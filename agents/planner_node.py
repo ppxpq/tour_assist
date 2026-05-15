@@ -80,6 +80,7 @@ def planner_agent(state: TravelState) -> dict:
     days = int(state.get("days") or 0)
     start_date = (state.get("start_date") or "").strip()
     preference = (state.get("preference") or "综合").strip()
+    travel_mode = (state.get("travel_mode") or "").strip()
     raw_materials = (state.get("raw_materials") or "").strip()
     tool_failures: list[dict] = state.get("tool_failures") or []
 
@@ -107,6 +108,12 @@ def planner_agent(state: TravelState) -> dict:
     availability_section = f"\n【数据可用性】\n{failure_notice}\n" if failure_notice else ""
 
     today_str = datetime.now().strftime("%Y年%m月%d日")
+
+    # 构建出行方式说明
+    travel_mode_section = ""
+    if travel_mode:
+        travel_mode_section = f"- 出行方式：{travel_mode}"
+
     prompt = f"""
 你是一位资深旅游规划师。今天是 {today_str}。请基于提供的资料，生成可执行的 {city} 行程方案。
 
@@ -115,6 +122,7 @@ def planner_agent(state: TravelState) -> dict:
 - 天数：{days if days > 0 else '未指定'}
 - 出发日期：{start_date if start_date else '未指定'}
 - 偏好：{preference}
+{travel_mode_section}
 
 【已采集资料】
 {formatted_materials}
@@ -131,6 +139,8 @@ def planner_agent(state: TravelState) -> dict:
 6. 每天补充 1-2 个餐饮建议。
 7. 最后给出"注意事项"与"预算建议（低/中/高三档）"。
 8. 不要编造资料中完全不存在的硬性事实；不确定信息用"建议/可考虑"表述。
+9. **交通建议要求**：
+   - 如果出行方式是自驾，请在交通建议中说明驾车路线和预计行驶时间。
 """
 
     try:

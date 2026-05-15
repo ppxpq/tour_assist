@@ -12,7 +12,27 @@ from core.llm_core import get_llm
 
 
 VALID_INTENTS = frozenset(
-    {"need_plan", "need_more_info", "need_answer", "general_chat", "other"}
+    {
+        "need_plan",
+        "need_more_info",
+        "need_answer",
+        "need_ticket",
+        "general_chat",
+        "other",
+    }
+)
+
+TICKET_QUERY_RE = re.compile(
+    r"车票|火车票|高铁票|动车票|列车票|余票|抢票|查票|候补|12306|"
+    r"(?:查询|查|看看|看一下|有没有|预订|订|买|购买|改签|退)[^，。！？\n]*"
+    r"(?:高铁|动车|火车|列车|铁路|车次)[^，。！？\n]*(?:票|余票)?"
+)
+RAIL_TICKET_HINT_RE = re.compile(
+    r"火车票|高铁票|动车票|列车票|余票|抢票|查票|候补|12306|"
+    r"高铁|动车|火车|列车|铁路|车次"
+)
+NON_TRAIN_TICKET_RE = re.compile(
+    r"机票|船票|汽车票|门票|景区|演出票|演唱会|电影票|电影|迪士尼"
 )
 
 MISSING_FIELD_LABELS: dict[str, str] = {
@@ -26,7 +46,7 @@ CLASSIFY_SYSTEM_TEMPLATE = """你是旅游助手的路由模块。
 今天是 {today}。请根据对话历史返回一个 JSON 对象，字段如下：
 
 {{
-  "intent": "need_plan | need_more_info | need_answer | general_chat | other",
+  "intent": "need_plan | need_more_info | need_answer | need_ticket | general_chat | other",
   "city": "目的地城市名，没有则为空字符串",
   "days": 0,  // 旅行天数，注意区分"玩x天"(days=x)和"y天后出发"(days=0，这是出发时间不是行程天数)
   "start_date": "出发日期，格式为 YYYY-MM-DD，没有则为空字符串。如用户说"5月20号出发"则填"{year}-05-20"，说"下周一"则根据今天日期推算具体日期",
@@ -37,6 +57,7 @@ CLASSIFY_SYSTEM_TEMPLATE = """你是旅游助手的路由模块。
 意图定义：
 - need_plan: 用户明确要你生成旅游计划/攻略/行程，并且信息基本齐全
 - need_more_info: 用户想规划行程，但目的地 / 天数 / 出发日期 / 偏好不完整
+- need_ticket: 用户需要查询火车票/高铁票/动车票/列车票/12306 余票、订票、改签、退票等车票信息。只要用户明确要查车票，就优先归为 need_ticket，不要归为 need_answer
 - need_answer: 用户在问具体问题，例如天气、景点、美食、交通、当前位置、图片识别、语音内容、知识库内容、个人偏好
 - general_chat: 问候、感谢、闲聊
 - other: 无法归类
@@ -99,6 +120,15 @@ def _safe_parse_json(text: str) -> Optional[dict]:
         return None
 
 
+def _looks_like_ticket_query(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text or "")
+    if not normalized:
+        return False
+    if NON_TRAIN_TICKET_RE.search(normalized) and not RAIL_TICKET_HINT_RE.search(normalized):
+        return False
+    return bool(TICKET_QUERY_RE.search(normalized))
+
+
 def router_agent(state: TravelState) -> dict:
     messages: list[BaseMessage] = list(state.get("messages", []))
     user_texts = human_texts(messages)
@@ -119,6 +149,18 @@ def router_agent(state: TravelState) -> dict:
                     content="你好，告诉我你想去哪里、玩几天、从哪天出发，以及更偏好的旅行风格，我就可以开始帮你规划。"
                 )
             ],
+        }
+
+    if _looks_like_ticket_query(user_input):
+        return {
+            "intent": "need_ticket",
+            "city": (state.get("city") or "").strip(),
+            "days": _sanitize_days(state.get("days", 0)),
+            "start_date": (state.get("start_date") or "").strip(),
+            "preference": (state.get("preference") or "").strip(),
+            "missing_fields": [],
+            "router_reason": "ticket_keyword",
+            "user_query": user_input,
         }
 
     recent_msgs = messages[-6:]

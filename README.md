@@ -19,25 +19,28 @@
 
 本项目采用 LangGraph 多节点流程：
 
-1. `Router`：识别用户意图（规划行程 / 问答 / 闲聊）并提取关键信息（城市、天数、出发日期、偏好）。
+1. `Router`：识别用户意图（规划行程 / 问答 / 车票查询 / 闲聊）并提取关键信息（城市、天数、出发日期、偏好）。
 2. `Researcher`：通过 LLM 工具调用自主搜集信息——天气预报、景点、餐饮、路线、知识库等，多个工具并行执行。
 3. `Planner`：基于汇总资料生成最终答复或完整行程。
+4. `Ticket`：仅在用户明确查询车票/火车票/高铁票时调用 12306 查询能力。
 
 不同意图会走不同路径：
 
 - 行程规划：`router -> researcher -> planner -> END`
 - 旅游问答 / 多模态识别 / RAG 问答：`router -> researcher -> END`
+- 车票查询：`router -> ticket_agent -> END`
 - 信息不足 / 闲聊 / 无法归类：`router -> END`
 
 ## 项目结构
 
 ```text
 tour/
-├─ agents/              # Router / Researcher / Planner 工作流节点
+├─ agents/              # Router / Researcher / Planner / Ticket 工作流节点
 │  ├─ graph.py           # LangGraph 图编排
 │  ├─ router_node.py     # 意图识别与信息提取
 │  ├─ research_node.py   # LLM 工具调用 + 并行搜集 + RAG 检索
 │  ├─ planner_node.py    # 行程生成
+│  ├─ ticket_node.py     # 车票查询
 │  └─ state.py           # 状态定义
 ├─ core/                # LLM、工具、知识库管理
 │  ├─ llm_core.py        # 多模型 LLM 初始化与缓存
@@ -174,4 +177,3 @@ streamlit run main.py
 - 会话自动重命名：根据首条消息生成有意义的会话标题
 - 节点运行可视化：Graphviz 流程图 + 实时状态与耗时表格
 - 增加 `.gitignore` 和 `api_key.env.example`，隔离密钥、向量库和 Python 缓存产物
-

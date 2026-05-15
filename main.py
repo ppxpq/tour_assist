@@ -24,11 +24,12 @@ from UI import (
 # ──────────────────────────────────────────────
 # 工具函数
 # ──────────────────────────────────────────────
-NODE_ORDER = ["router", "researcher", "planner"]
+NODE_ORDER = ["router", "researcher", "planner", "ticket_agent"]
 NODE_TITLE = {
     "router": "Router 意图解析",
     "researcher": "Researcher 资料搜集",
     "planner": "Planner 行程生成",
+    "ticket_agent": "Ticket 车票查询",
 }
 STATUS_LABEL = {
     "pending": "待执行",
@@ -289,6 +290,12 @@ def _build_node_note(node: str, update: dict[str, Any]) -> str:
         output = _extract_ai_text(update.get("messages"))
         return f"输出字符数={len(output)}" if output else "已生成回复"
 
+    if node == "ticket_agent":
+        departure = update.get("departure") or "-"
+        city = update.get("city") or "-"
+        date = update.get("start_date") or "-"
+        return f"{departure}→{city} {date}"
+
     return "-"
 
 
@@ -307,11 +314,13 @@ def _build_runtime_dot(runtime: dict[str, dict[str, Any]]) -> str:
         fill = STATUS_COLOR.get(status, "#E2E8F0")
         lines.append(f"{node} [label=\"{title}\\n{label}\", fillcolor=\"{fill}\"];")
     lines.append("end [label=\"END\", shape=oval, style=\"filled\", fillcolor=\"#F8FAFC\", color=\"#94A3B8\"];")
+    lines.append("router -> ticket_agent [label=\"need_ticket\"];")
     lines.append("router -> researcher [label=\"need_plan / need_answer\"];")
     lines.append("router -> end [label=\"other\"];")
     lines.append("researcher -> planner [label=\"need_plan\"];")
     lines.append("researcher -> end [label=\"need_answer\"];")
     lines.append("planner -> end;")
+    lines.append("ticket_agent -> end;")
     lines.append("}")
     return "\n".join(lines)
 
@@ -369,11 +378,17 @@ def run_travel_graph(
 
             if node_name == "router":
                 latest_intent = str(update.get("intent") or "").strip().lower()
-                if latest_intent in {"need_plan", "need_answer"}:
+                if latest_intent == "need_ticket":
+                    _mark_running(runtime, "ticket_agent")
+                    _mark_skipped(runtime, "researcher", "由路由策略跳过")
+                    _mark_skipped(runtime, "planner", "由路由策略跳过")
+                elif latest_intent in {"need_plan", "need_answer"}:
                     _mark_running(runtime, "researcher")
+                    _mark_skipped(runtime, "ticket_agent", "由路由策略跳过")
                 else:
                     _mark_skipped(runtime, "researcher", "由路由策略跳过")
                     _mark_skipped(runtime, "planner", "由路由策略跳过")
+                    _mark_skipped(runtime, "ticket_agent", "由路由策略跳过")
             elif node_name == "researcher":
                 if latest_intent == "need_plan":
                     _mark_running(runtime, "planner")

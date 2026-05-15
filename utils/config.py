@@ -51,6 +51,7 @@ MODEL_LIST = [
     "qwen-audio-turbo",
     "mimo-v2.5-pro",
     "mimo-v2-omni",
+    "mimo-V2.5"
 ]
 
 # --- 初始化环境 (移除代理) ---

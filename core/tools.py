@@ -321,44 +321,6 @@ def get_route_distance(
         f"预计用时：约 {duration_str}"
     )
 
-
-# @tool
-# def generate_travel_plan(
-#     city: str,
-#     days: int,
-#     preference: Optional[str] = "综合",
-# ) -> str:
-#     """
-#     根据目的地、天数、偏好生成完整旅游行程。
-#     在收集好城市、天数、用户偏好后调用，是行程规划的最终步骤。
-
-#     Args:
-#         city:       目的地城市，如「成都」。
-#         days:       旅行天数，1–14 之间的整数。
-#         preference: 可选，游玩偏好，如「美食」「人文」「自然风光」，默认综合推荐。
-#     """
-#     if not (1 <= days <= 14):
-#         return "天数需在 1–14 之间，请重新确认。"
-
-#     prompt = f"""你是一位专业旅游规划师，请为用户生成 {city} {days} 日游行程。
-
-# 用户偏好：{preference}
-
-# 要求：
-# 1. 按天拆分，每天分「上午 / 下午」两段；
-# 2. 每段包含：景点/活动名称、简短理由（1句话）、建议时长；
-# 3. 每天末尾附上当日餐饮亮点推荐（1–2处）；
-# 4. 行程节奏轻松，避免过度赶场；
-# 5. 输出使用 Markdown，结构清晰。"""
-
-#     try:
-#         return _get_llm().invoke(prompt).content
-#     except Exception as e:
-#         return f"行程生成失败，请稍后重试。（{e}）"
-
-
-
-
 @tool
 def speech_to_text(audio_input: str) -> str:
     """

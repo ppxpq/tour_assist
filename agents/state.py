@@ -19,6 +19,7 @@ class TravelState(TypedDict, total=False):
     days: int
     start_date: str
     preference: str
+    travel_mode: str  # 出行方式：自驾 / 高铁 / 火车
     raw_materials: str
     missing_fields: list[str]
     router_reason: str
@@ -27,4 +28,5 @@ class TravelState(TypedDict, total=False):
     user_query: str
     vector_db: Any
     tool_failures: list[dict]
+    departure: str
     
