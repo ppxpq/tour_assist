@@ -155,7 +155,7 @@ def load_db():
 
 def ingest_documents(uploaded_files, vector_db, selected_model):
     """
-    uploaded_files: Streamlit UploadedFile 列表
+    uploaded_files: file-like objects with .name and .getbuffer()
     vector_db: 当前 Chroma 实例，可能为 None
     selected_model: 保留参数，便于后续扩展
     """

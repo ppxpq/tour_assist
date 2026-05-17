@@ -1,8 +1,9 @@
-streamlit
+fastapi
+uvicorn[standard]
+python-multipart
 python-dotenv
 requests
 openai
-graphviz
 
 langchain-core
 langchain-openai

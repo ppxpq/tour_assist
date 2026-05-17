@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import datetime
+from datetime import date as Date, datetime, timedelta
 from typing import Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -39,6 +39,140 @@ def _safe_parse_json(text: str) -> Optional[dict]:
         return result if isinstance(result, dict) else None
     except (json.JSONDecodeError, ValueError):
         return None
+
+
+_CN_NUMBER_MAP = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_WEEKDAY_MAP = {
+    "一": 0,
+    "二": 1,
+    "三": 2,
+    "四": 3,
+    "五": 4,
+    "六": 5,
+    "日": 6,
+    "天": 6,
+    "1": 0,
+    "2": 1,
+    "3": 2,
+    "4": 3,
+    "5": 4,
+    "6": 5,
+    "7": 6,
+}
+
+
+def _parse_cn_int(raw: str) -> Optional[int]:
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    if raw in _CN_NUMBER_MAP:
+        return _CN_NUMBER_MAP[raw]
+    if "十" in raw:
+        tens_raw, _, ones_raw = raw.partition("十")
+        tens = 1 if not tens_raw else _CN_NUMBER_MAP.get(tens_raw)
+        ones = 0 if not ones_raw else _CN_NUMBER_MAP.get(ones_raw)
+        if tens is not None and ones is not None:
+            return tens * 10 + ones
+    return None
+
+
+def _format_date(value: Date) -> str:
+    return value.strftime("%Y-%m-%d")
+
+
+def _safe_build_date(year: int, month: int, day: int) -> Optional[Date]:
+    try:
+        return Date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _next_month_day(month: int, day: int, today: Date) -> Optional[Date]:
+    candidate = _safe_build_date(today.year, month, day)
+    if candidate is None:
+        return None
+    if candidate < today:
+        candidate = _safe_build_date(today.year + 1, month, day)
+    return candidate
+
+
+def _parse_local_ticket_date(text: str, today: Date | None = None) -> str:
+    """Parse common Chinese date expressions deterministically for ticket queries."""
+    normalized = re.sub(r"\s+", "", text or "")
+    if not normalized:
+        return ""
+
+    today = today or datetime.now().date()
+
+    for word, offset in (
+        ("大后天", 3),
+        ("大後天", 3),
+        ("后天", 2),
+        ("後天", 2),
+        ("明天", 1),
+        ("今天", 0),
+    ):
+        if word in normalized:
+            return _format_date(today + timedelta(days=offset))
+
+    days_later_match = re.search(r"(?P<days>\d+|[一二两三四五六七八九十]{1,3})天后", normalized)
+    if days_later_match:
+        days = _parse_cn_int(days_later_match.group("days"))
+        if days is not None and 0 <= days <= 60:
+            return _format_date(today + timedelta(days=days))
+
+    full_date_match = re.search(
+        r"(?P<year>\d{4})[年/-](?P<month>\d{1,2})[月/-](?P<day>\d{1,2})(?:日|号)?",
+        normalized,
+    )
+    if full_date_match:
+        parsed_date = _safe_build_date(
+            int(full_date_match.group("year")),
+            int(full_date_match.group("month")),
+            int(full_date_match.group("day")),
+        )
+        return _format_date(parsed_date) if parsed_date else ""
+
+    month_day_match = re.search(
+        r"(?<!\d)(?P<month>\d{1,2})(?:月|[/-])(?P<day>\d{1,2})(?:日|号)?(?!\d)",
+        normalized,
+    )
+    if month_day_match:
+        parsed_date = _next_month_day(
+            int(month_day_match.group("month")),
+            int(month_day_match.group("day")),
+            today,
+        )
+        return _format_date(parsed_date) if parsed_date else ""
+
+    next_week_match = re.search(r"(?:下周|下星期|下礼拜)(?P<weekday>[一二三四五六日天1234567])", normalized)
+    if next_week_match:
+        weekday = _WEEKDAY_MAP.get(next_week_match.group("weekday"))
+        if weekday is not None:
+            days_to_next_monday = 7 - today.weekday()
+            return _format_date(today + timedelta(days=days_to_next_monday + weekday))
+
+    week_match = re.search(r"(?:这周|本周|周|星期|礼拜)(?P<weekday>[一二三四五六日天1234567])", normalized)
+    if week_match:
+        weekday = _WEEKDAY_MAP.get(week_match.group("weekday"))
+        if weekday is not None:
+            days_ahead = (weekday - today.weekday()) % 7
+            return _format_date(today + timedelta(days=days_ahead))
+
+    return ""
 
 
 _TRAIN_RE = re.compile(
@@ -182,6 +316,7 @@ def ticket_agent(state: TravelState) -> dict:
         }
 
     now = datetime.now()
+    local_date = _parse_local_ticket_date(user_input, today=now.date())
     system_prompt = _TICKET_SYSTEM.format(today=now.strftime("%Y年%m月%d日"))
 
     try:
@@ -213,6 +348,8 @@ def ticket_agent(state: TravelState) -> dict:
         departure = (state.get("departure") or "").strip()
     if not destination:
         destination = (state.get("city") or "").strip()
+    if local_date:
+        date = local_date
     if not date:
         date = (state.get("start_date") or "").strip()
 

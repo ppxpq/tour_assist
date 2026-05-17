@@ -17,6 +17,7 @@ venv/
 data/chroma_db/
 data/uploads/
 *.sqlite3
+*.sqlite3-*
 
 # Local tooling and OS noise
 .DS_Store

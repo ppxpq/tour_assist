@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>行迹规划</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="旅行记录与资料库">
+        <header class="brand">
+          <div class="brand-mark">行</div>
+          <div>
+            <h1>行迹规划</h1>
+            <p>把旅行想法整理成路线</p>
+          </div>
+        </header>
+
+        <section class="panel">
+          <label class="field-label" for="apiBaseInput">服务地址</label>
+          <div class="inline-control">
+            <input id="apiBaseInput" type="url" value="http://127.0.0.1:8000" spellcheck="false" />
+            <button id="saveApiBaseBtn" type="button">保存</button>
+          </div>
+          <div id="healthStatus" class="status-pill status-muted">未连接</div>
+        </section>
+
+        <section class="panel panel-grow">
+          <div class="section-title">
+            <h2>旅行记录</h2>
+            <button id="newSessionBtn" class="icon-button" type="button" title="新建记录" aria-label="新建记录">
+              +
+            </button>
+          </div>
+          <div id="sessionList" class="session-list" aria-live="polite"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>资料库</h2>
+            <span id="kbBadge" class="mini-badge">未加载</span>
+          </div>
+          <p id="kbStatusText" class="muted-text">上传攻略、笔记或表格，规划时会一起参考。</p>
+          <input id="kbFileInput" class="hidden-input" type="file" multiple accept=".pdf,.txt,.docx,.csv" />
+          <div class="button-row">
+            <button id="uploadKbBtn" class="secondary-button" type="button">上传文档</button>
+            <button id="clearKbBtn" class="ghost-button" type="button">清空</button>
+          </div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button id="sidebarToggleBtn" class="icon-button mobile-only" type="button" aria-label="打开菜单">
+            ☰
+          </button>
+          <div>
+            <h2 id="activeSessionTitle">新会话</h2>
+            <p id="activeSessionMeta">选择一条记录，继续完善路线</p>
+          </div>
+          <div class="model-control">
+            <label for="modelSelect">规划模型</label>
+            <select id="modelSelect"></select>
+          </div>
+        </header>
+
+        <section class="workspace">
+          <div class="chat-column">
+            <div id="messageList" class="message-list" aria-live="polite">
+              <div class="empty-state">
+                <h2>你想怎么出发？</h2>
+                <p>说目的地、日期、天数、同行人和偏好，我会帮你整理成清楚的路线。</p>
+              </div>
+            </div>
+
+            <form id="chatForm" class="composer">
+              <div id="selectedFiles" class="selected-files" aria-live="polite"></div>
+              <div class="composer-main">
+                <button id="attachBtn" class="icon-button" type="button" title="上传图片或语音" aria-label="上传图片或语音">
+                  +
+                </button>
+                <textarea
+                  id="messageInput"
+                  rows="1"
+                  placeholder="例如：5 月底去泉州 4 天，喜欢老城、美食和慢节奏..."
+                  autocomplete="off"
+                ></textarea>
+                <button id="sendBtn" class="send-button" type="submit">发送</button>
+              </div>
+              <input
+                id="chatFileInput"
+                class="hidden-input"
+                type="file"
+                multiple
+                accept="image/*,audio/*,.jpg,.jpeg,.png,.webp,.bmp,.gif,.mp3,.wav,.m4a,.ogg,.webm,.flac,.aac"
+              />
+            </form>
+          </div>
+
+          <aside class="runtime-column" aria-label="规划进度">
+            <div class="runtime-header">
+              <div>
+                <h2>规划进度</h2>
+                <p id="elapsedText">还没有开始</p>
+              </div>
+              <button id="clearSessionBtn" class="ghost-button" type="button">清空记录</button>
+            </div>
+            <div id="runtimeList" class="runtime-list"></div>
+            <div class="quick-prompts">
+              <h3>灵感模板</h3>
+              <button type="button" data-prompt="我想去西安玩 3 天，5 月 20 日出发，喜欢历史、美食和摄影，请帮我规划行程。">
+                做一份 3 天游玩路线
+              </button>
+              <button type="button" data-prompt="查询明天从南京到西安的高铁票。">
+                查询车票
+              </button>
+              <button type="button" data-prompt="根据知识库内容，推荐适合亲子游的目的地。">
+                知识库问答
+              </button>
+            </div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

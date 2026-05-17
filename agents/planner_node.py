@@ -1,11 +1,70 @@
 import json
 import re
 from datetime import datetime
+from typing import Any
 
 from langchain_core.messages import AIMessage
 
 from agents.state import TravelState
 from core.llm_core import get_llm
+
+try:
+    from langgraph.config import get_stream_writer
+except Exception:  # pragma: no cover - keeps older LangGraph installs importable
+    get_stream_writer = None
+
+
+def _chunk_text(chunk: Any) -> str:
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return "" if content is None else str(content)
+
+
+def _get_writer():
+    if get_stream_writer is None:
+        return None
+    try:
+        return get_stream_writer()
+    except Exception:
+        return None
+
+
+def _stream_llm_text(llm: Any, prompt: str, *, node: str = "planner") -> str:
+    writer = _get_writer()
+    chunks: list[str] = []
+
+    try:
+        for chunk in llm.stream(prompt):
+            text = _chunk_text(chunk)
+            if not text:
+                continue
+            chunks.append(text)
+            if writer is not None:
+                writer({"type": "message_delta", "node": node, "delta": text})
+    except Exception:
+        # Some OpenAI-compatible providers do not support streaming. If the
+        # stream failed before any text was emitted, fall back to the original
+        # blocking invoke path so the user still gets an answer.
+        if chunks:
+            raise
+        response = llm.invoke(prompt)
+        content = getattr(response, "content", None) or str(response)
+        if writer is not None and content:
+            writer({"type": "message_delta", "node": node, "delta": content})
+        return content
+
+    return "".join(chunks)
 
 
 def _build_failure_notice(tool_failures: list[dict]) -> str:
@@ -144,8 +203,10 @@ def planner_agent(state: TravelState) -> dict:
 """
 
     try:
-        response = llm.invoke(prompt)
-        content = getattr(response, "content", None) or str(response)
+        content = _stream_llm_text(llm, prompt).strip()
+        if not content:
+            response = llm.invoke(prompt)
+            content = getattr(response, "content", None) or str(response)
         return {"messages": [AIMessage(content=content)]}
     except Exception as exc:
         return {
