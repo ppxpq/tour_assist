@@ -2,7 +2,11 @@
   "use strict";
 
   const API_BASE_KEY = "travelAssistant.apiBase";
+  const RUNTIME_WIDTH_KEY = "travelAssistant.runtimeWidth";
+  const ACTIVE_SESSION_KEY = "travelAssistant.activeSessionId";
+  const TRIP_BUILDER_OPEN_KEY = "travelAssistant.tripBuilderOpen";
   const DEFAULT_API_BASE = "http://127.0.0.1:8000";
+  const MULTI_TRIP_FIELDS = new Set(["travelers", "preferences", "localMobility"]);
 
   const STEPS = [
     { key: "router", title: "理解需求" },
@@ -33,7 +37,11 @@
     activeSession: null,
     sessions: [],
     selectedFiles: [],
+    tripDraft: createEmptyTripDraft(),
+    tripDraftDirty: false,
+    latestItineraryMarkdown: "",
     isBusy: false,
+    shouldAutoScroll: true,
     toastTimer: null,
   };
 
@@ -49,11 +57,23 @@
     messageList: document.getElementById("messageList"),
     chatForm: document.getElementById("chatForm"),
     messageInput: document.getElementById("messageInput"),
+    tripDestinationInput: document.getElementById("tripDestinationInput"),
+    tripStartDateInput: document.getElementById("tripStartDateInput"),
+    tripDepartureInput: document.getElementById("tripDepartureInput"),
+    tripDaysInput: document.getElementById("tripDaysInput"),
+    tripBuilderToggleBtn: document.getElementById("tripBuilderToggleBtn"),
+    tripBuilderBody: document.getElementById("tripBuilderBody"),
+    tripDraftSummary: document.getElementById("tripDraftSummary"),
+    clearTripDraftBtn: document.getElementById("clearTripDraftBtn"),
+    tripButtons: Array.from(document.querySelectorAll("[data-trip-field]")),
     sendBtn: document.getElementById("sendBtn"),
     attachBtn: document.getElementById("attachBtn"),
     chatFileInput: document.getElementById("chatFileInput"),
     selectedFiles: document.getElementById("selectedFiles"),
     runtimeList: document.getElementById("runtimeList"),
+    runtimeTabs: Array.from(document.querySelectorAll("[data-runtime-tab]")),
+    runtimePanels: Array.from(document.querySelectorAll("[data-runtime-panel]")),
+    tripSummaryPanel: document.getElementById("tripSummaryPanel"),
     elapsedText: document.getElementById("elapsedText"),
     clearSessionBtn: document.getElementById("clearSessionBtn"),
     kbBadge: document.getElementById("kbBadge"),
@@ -64,15 +84,35 @@
     toast: document.getElementById("toast"),
     sidebar: document.querySelector(".sidebar"),
     sidebarToggleBtn: document.getElementById("sidebarToggleBtn"),
+    workspace: document.querySelector(".workspace"),
+    columnResizer: document.getElementById("columnResizer"),
   };
 
   document.addEventListener("DOMContentLoaded", init);
+
+  function createEmptyTripDraft() {
+    return {
+      destination: "",
+      startDate: "",
+      departure: "",
+      days: "",
+      travelers: [],
+      preferences: [],
+      budget: "",
+      arrivalMode: "",
+      localMobility: [],
+    };
+  }
 
   async function init() {
     state.apiBase = normalizeApiBase(localStorage.getItem(API_BASE_KEY) || DEFAULT_API_BASE);
     els.apiBaseInput.value = state.apiBase;
 
     bindEvents();
+    restoreRuntimeWidth();
+    restoreTripBuilderState();
+    renderTripSummary();
+    renderTripSummaryPanel();
     renderRuntime();
     renderSelectedFiles();
     setBusy(false);
@@ -94,9 +134,49 @@
     els.attachBtn.addEventListener("click", () => els.chatFileInput.click());
     els.chatFileInput.addEventListener("change", handleChatFilesSelected);
     els.chatForm.addEventListener("submit", handleSubmit);
+    els.tripBuilderToggleBtn.addEventListener("click", toggleTripBuilder);
+    els.clearTripDraftBtn.addEventListener("click", clearTripDraft);
+    els.tripDestinationInput.addEventListener("input", () => {
+      state.tripDraft.destination = els.tripDestinationInput.value.trim();
+      state.tripDraftDirty = true;
+      renderTripSummary();
+      renderTripSummaryPanel();
+    });
+    els.tripStartDateInput.addEventListener("input", () => {
+      state.tripDraft.startDate = els.tripStartDateInput.value;
+      state.tripDraftDirty = true;
+      renderTripSummary();
+      renderTripSummaryPanel();
+    });
+    els.tripDepartureInput.addEventListener("input", () => {
+      state.tripDraft.departure = els.tripDepartureInput.value.trim();
+      state.tripDraftDirty = true;
+      renderTripSummary();
+      renderTripSummaryPanel();
+    });
+    els.tripDaysInput.addEventListener("input", () => {
+      const days = Number(els.tripDaysInput.value);
+      const normalizedDays = Number.isFinite(days) && days >= 5 ? Math.min(days, 30) : 0;
+      if (normalizedDays && String(normalizedDays) !== els.tripDaysInput.value) {
+        els.tripDaysInput.value = String(normalizedDays);
+      }
+      state.tripDraft.days = normalizedDays ? `${normalizedDays}天` : "";
+      state.tripDraftDirty = true;
+      renderTripTags();
+      renderTripSummary();
+      renderTripSummaryPanel();
+    });
+    els.tripButtons.forEach((button) => {
+      button.addEventListener("click", () => toggleTripTag(button));
+    });
 
     els.messageInput.addEventListener("input", () => {
       resizeTextarea(els.messageInput);
+    });
+
+    els.messageList.addEventListener("scroll", () => {
+      const distanceFromBottom = els.messageList.scrollHeight - els.messageList.scrollTop - els.messageList.clientHeight;
+      state.shouldAutoScroll = distanceFromBottom < 80;
     });
 
     els.messageInput.addEventListener("keydown", (event) => {
@@ -122,6 +202,9 @@
       els.sidebar.classList.toggle("open");
     });
 
+    initColumnResizer();
+    initRuntimeTabs();
+
     document.addEventListener("click", (event) => {
       if (!els.sidebar.classList.contains("open")) {
         return;
@@ -135,6 +218,328 @@
 
   function normalizeApiBase(value) {
     return String(value || DEFAULT_API_BASE).trim().replace(/\/+$/, "") || DEFAULT_API_BASE;
+  }
+
+  function toggleTripTag(button) {
+    const field = button.getAttribute("data-trip-field");
+    const value = button.getAttribute("data-trip-value") || "";
+    if (!field || !value) {
+      return;
+    }
+
+    if (MULTI_TRIP_FIELDS.has(field)) {
+      const current = state.tripDraft[field] || [];
+      state.tripDraft[field] = current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value];
+    } else {
+      state.tripDraft[field] = state.tripDraft[field] === value ? "" : value;
+      if (field === "days") {
+        els.tripDaysInput.value = "";
+      }
+    }
+
+    state.tripDraftDirty = true;
+    renderTripTags();
+    renderTripSummary();
+    renderTripSummaryPanel();
+  }
+
+  function renderTripTags() {
+    els.tripButtons.forEach((button) => {
+      const field = button.getAttribute("data-trip-field");
+      const value = button.getAttribute("data-trip-value") || "";
+      const current = state.tripDraft[field];
+      const isActive = Array.isArray(current) ? current.includes(value) : current === value;
+      button.classList.toggle("active", isActive);
+      button.setAttribute("aria-pressed", String(isActive));
+    });
+  }
+
+  function toggleTripBuilder() {
+    const isOpen = els.tripBuilderToggleBtn.getAttribute("aria-expanded") === "true";
+    setTripBuilderOpen(!isOpen);
+  }
+
+  function setTripBuilderOpen(isOpen) {
+    els.tripBuilderToggleBtn.setAttribute("aria-expanded", String(isOpen));
+    els.tripBuilderBody.hidden = !isOpen;
+    localStorage.setItem(TRIP_BUILDER_OPEN_KEY, isOpen ? "true" : "false");
+    const caret = els.tripBuilderToggleBtn.querySelector(".toggle-caret");
+    if (caret) {
+      caret.textContent = isOpen ? "▾" : "▸";
+    }
+  }
+
+  function restoreTripBuilderState() {
+    const stored = localStorage.getItem(TRIP_BUILDER_OPEN_KEY);
+    setTripBuilderOpen(stored === "true");
+  }
+
+  function renderTripSummary() {
+    const draft = state.tripDraft;
+    const parts = [];
+    if (draft.destination) {
+      parts.push(draft.destination);
+    }
+    if (draft.days) {
+      parts.push(draft.days);
+    }
+    if (draft.startDate) {
+      parts.push(draft.startDate);
+    }
+    if (draft.travelers.length) {
+      parts.push(draft.travelers.join("/"));
+    }
+    if (draft.preferences.length) {
+      parts.push(draft.preferences.slice(0, 3).join("/"));
+    }
+    if (draft.budget) {
+      parts.push(`${draft.budget}预算`);
+    }
+    if (draft.localMobility.length) {
+      parts.push(draft.localMobility.slice(0, 2).join("/"));
+    }
+    els.tripDraftSummary.textContent = parts.length ? parts.join(" · ") : "未选择标签，可直接聊天";
+  }
+
+  function renderTripSummaryPanel() {
+    if (!els.tripSummaryPanel) {
+      return;
+    }
+
+    const draftItems = getTripDraftItems();
+    const latestUserMessage = getLatestUserMessage();
+    const latestTitle = getItineraryTitle(state.latestItineraryMarkdown);
+    const hasDraft = draftItems.some((item) => item.value !== "未指定");
+
+    const draftHtml = hasDraft
+      ? draftItems.map((item) => `
+          <div class="summary-row">
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(item.value)}</strong>
+          </div>
+        `).join("")
+      : '<p class="summary-empty">还没有选择标签。展开左侧“快速描述需求”，可以先把目的地、天数、预算和交通偏好搭起来。</p>';
+
+    const requestHtml = latestUserMessage
+      ? `<div class="summary-request">${renderMarkdown(latestUserMessage)}</div>`
+      : '<p class="summary-empty">发送需求后，这里会保留最近一次规划依据。</p>';
+
+    const itineraryHtml = latestTitle
+      ? `
+        <div class="summary-latest">
+          <span>最新行程</span>
+          <strong>${escapeHtml(latestTitle)}</strong>
+          <div class="summary-actions">
+            <button type="button" data-summary-action="copy">复制</button>
+            <button type="button" data-summary-action="export">导出 MD</button>
+          </div>
+        </div>
+      `
+      : '<p class="summary-empty">生成行程后，可在这里快速复制或导出 Markdown。</p>';
+
+    els.tripSummaryPanel.innerHTML = `
+      <section class="summary-card">
+        <h3>当前标签</h3>
+        ${draftHtml}
+      </section>
+      <section class="summary-card">
+        <h3>最新路线</h3>
+        ${requestHtml}
+      </section>
+      <section class="summary-card">
+        <h3>结果操作</h3>
+        ${itineraryHtml}
+      </section>
+    `;
+
+    els.tripSummaryPanel.querySelector("[data-summary-action='copy']")?.addEventListener("click", () => {
+      copyMarkdown(state.latestItineraryMarkdown);
+    });
+    els.tripSummaryPanel.querySelector("[data-summary-action='export']")?.addEventListener("click", () => {
+      exportMarkdown(state.latestItineraryMarkdown);
+    });
+  }
+
+  function getTripDraftItems() {
+    const draft = state.tripDraft;
+    return [
+      { label: "目的地", value: draft.destination || "未指定" },
+      { label: "天数", value: draft.days || "未指定" },
+      { label: "出发日期", value: draft.startDate || "未指定" },
+      { label: "出发地", value: draft.departure || "未指定" },
+      { label: "到达方式", value: draft.arrivalMode || "未指定" },
+      { label: "同行", value: draft.travelers.join("、") || "未指定" },
+      { label: "偏好", value: draft.preferences.join("、") || "未指定" },
+      { label: "预算", value: draft.budget || "未指定" },
+      { label: "当地交通", value: draft.localMobility.join("、") || "未指定" },
+    ];
+  }
+
+  function getLatestUserMessage() {
+    const messages = state.activeSession?.messages || [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === "user" && messages[index]?.content) {
+        return messages[index].content;
+      }
+    }
+    return "";
+  }
+
+  function clearTripDraft() {
+    state.tripDraft = createEmptyTripDraft();
+    els.tripDestinationInput.value = "";
+    els.tripStartDateInput.value = "";
+    els.tripDepartureInput.value = "";
+    els.tripDaysInput.value = "";
+    state.tripDraftDirty = false;
+    renderTripTags();
+    renderTripSummary();
+    renderTripSummaryPanel();
+    showToast("已清空标签选择");
+  }
+
+  function hasTripDraft() {
+    const draft = state.tripDraft;
+    return Boolean(
+      draft.destination ||
+      draft.startDate ||
+      draft.departure ||
+      draft.days ||
+      draft.budget ||
+      draft.arrivalMode ||
+      draft.travelers.length ||
+      draft.preferences.length ||
+      draft.localMobility.length,
+    );
+  }
+
+  function buildTripPrompt(freeText, useTripDraft = true) {
+    const draft = state.tripDraft;
+    const supplement = (freeText || "").trim();
+    if (!useTripDraft || !hasTripDraft()) {
+      return supplement;
+    }
+
+    const lines = [];
+    const firstLine = [
+      draft.destination ? `我想去${draft.destination}` : "我想规划一次出行",
+      draft.days ? `玩${draft.days}` : "",
+      draft.startDate ? `${draft.startDate}出发` : "",
+    ].filter(Boolean).join("，");
+    lines.push(`${firstLine}。`);
+
+    if (draft.departure || draft.arrivalMode) {
+      lines.push(`出发地：${draft.departure || "未指定"}；到达方式：${draft.arrivalMode || "未指定"}。`);
+    }
+    if (draft.travelers.length) {
+      lines.push(`同行人：${draft.travelers.join("、")}。`);
+    }
+    if (draft.preferences.length) {
+      lines.push(`偏好：${draft.preferences.join("、")}。`);
+    }
+    if (draft.budget) {
+      lines.push(`预算：${draft.budget}。`);
+    }
+    if (draft.localMobility.length) {
+      lines.push(`当地交通偏好：${draft.localMobility.join("、")}。`);
+    }
+    if (supplement) {
+      lines.push(`补充要求：${supplement}`);
+    }
+    return lines.join("\n");
+  }
+
+  function restoreRuntimeWidth() {
+    const stored = Number(localStorage.getItem(RUNTIME_WIDTH_KEY) || 0);
+    if (Number.isFinite(stored) && stored >= 260) {
+      setRuntimeWidth(stored);
+    }
+  }
+
+  function setRuntimeWidth(width) {
+    const workspaceWidth = els.workspace?.getBoundingClientRect().width || 0;
+    const maxWidth = workspaceWidth ? Math.max(260, Math.min(560, workspaceWidth - 520)) : 560;
+    const nextWidth = Math.round(Math.max(260, Math.min(maxWidth, width)));
+    document.documentElement.style.setProperty("--runtime-width", `${nextWidth}px`);
+    return nextWidth;
+  }
+
+  function initColumnResizer() {
+    if (!els.columnResizer || !els.workspace) {
+      return;
+    }
+
+    let startX = 0;
+    let startWidth = 0;
+
+    const stopResize = () => {
+      document.body.classList.remove("column-resizing");
+      els.workspace.classList.remove("resizing");
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    };
+
+    const onPointerMove = (event) => {
+      const nextWidth = setRuntimeWidth(startWidth - (event.clientX - startX));
+      localStorage.setItem(RUNTIME_WIDTH_KEY, String(nextWidth));
+    };
+
+    els.columnResizer.addEventListener("pointerdown", (event) => {
+      if (window.matchMedia("(max-width: 1100px)").matches) {
+        return;
+      }
+      event.preventDefault();
+      startX = event.clientX;
+      startWidth = document.querySelector(".runtime-column")?.getBoundingClientRect().width || 340;
+      document.body.classList.add("column-resizing");
+      els.workspace.classList.add("resizing");
+      els.columnResizer.setPointerCapture?.(event.pointerId);
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", stopResize);
+      window.addEventListener("pointercancel", stopResize);
+    });
+
+    els.columnResizer.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+      const currentWidth = document.querySelector(".runtime-column")?.getBoundingClientRect().width || 340;
+      let nextWidth = currentWidth;
+      if (event.key === "ArrowLeft") {
+        nextWidth = currentWidth + 24;
+      } else if (event.key === "ArrowRight") {
+        nextWidth = currentWidth - 24;
+      } else if (event.key === "Home") {
+        nextWidth = 260;
+      } else if (event.key === "End") {
+        nextWidth = 520;
+      }
+      localStorage.setItem(RUNTIME_WIDTH_KEY, String(setRuntimeWidth(nextWidth)));
+    });
+  }
+
+  function initRuntimeTabs() {
+    els.runtimeTabs.forEach((button) => {
+      button.addEventListener("click", () => {
+        setRuntimeTab(button.getAttribute("data-runtime-tab") || "progress");
+      });
+    });
+  }
+
+  function setRuntimeTab(tabName) {
+    els.runtimeTabs.forEach((button) => {
+      const isActive = button.getAttribute("data-runtime-tab") === tabName;
+      button.classList.toggle("active", isActive);
+      button.setAttribute("aria-selected", String(isActive));
+    });
+    els.runtimePanels.forEach((panel) => {
+      const isActive = panel.getAttribute("data-runtime-panel") === tabName;
+      panel.classList.toggle("active", isActive);
+    });
   }
 
   function apiUrl(path) {
@@ -209,7 +614,7 @@
     }
   }
 
-  async function loadSessions(preferredSessionId = state.activeSessionId, options = {}) {
+  async function loadSessions(preferredSessionId = state.activeSessionId || localStorage.getItem(ACTIVE_SESSION_KEY), options = {}) {
     try {
       const payload = await fetchJson("/api/sessions");
       state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
@@ -298,6 +703,7 @@
       const payload = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
       state.activeSession = payload.session;
       state.activeSessionId = payload.session.id;
+      localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
       renderSessions();
       renderMessages(payload.session.messages || []);
       updateSessionHeader();
@@ -318,6 +724,9 @@
       });
       const id = payload.session?.id;
       state.activeSessionId = id || null;
+      if (state.activeSessionId) {
+        localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
+      }
       await loadSessions(id);
       showToast("已创建新会话");
     } catch (error) {
@@ -336,6 +745,11 @@
       });
       const nextId = payload.current_session || null;
       state.activeSessionId = sessionId === state.activeSessionId ? nextId : state.activeSessionId;
+      if (state.activeSessionId) {
+        localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
+      } else {
+        localStorage.removeItem(ACTIVE_SESSION_KEY);
+      }
       await loadSessions(state.activeSessionId);
       showToast("会话已删除");
     } catch (error) {
@@ -412,7 +826,9 @@
       return;
     }
 
-    const message = els.messageInput.value.trim();
+    const rawMessage = els.messageInput.value.trim();
+    const shouldUseTripDraft = state.tripDraftDirty || (!rawMessage && hasTripDraft());
+    const message = buildTripPrompt(rawMessage, shouldUseTripDraft);
     const files = [...state.selectedFiles];
     if (!message && !files.length) {
       showToast("先说一点旅行想法，或上传图片/语音");
@@ -421,12 +837,17 @@
 
     els.messageInput.value = "";
     resizeTextarea(els.messageInput);
+    state.tripDraftDirty = false;
     state.selectedFiles = [];
     renderSelectedFiles();
 
     const displayText = files.length ? `${message || "已上传文件"}\n\n${files.map((file) => `- ${file.name}`).join("\n")}` : message;
     appendMessage("user", displayText);
+    rememberMessage("user", displayText);
+    renderTripSummaryPanel();
     const assistantBubble = appendMessage("assistant", "", true);
+    state.shouldAutoScroll = true;
+    scrollMessagesToBottom(true);
     setBusy(true);
     renderRuntime();
     els.elapsedText.textContent = "正在整理路线";
@@ -439,7 +860,7 @@
       }
       await Promise.allSettled([refreshSessionSummaries(), refreshHealth(), refreshKnowledgeStatus()]);
     } catch (error) {
-      assistantBubble.innerHTML = renderMarkdown(`请求失败：${error.message}`);
+      setBubbleContent(assistantBubble, "assistant", `请求失败：${error.message}`);
       showToast(`请求失败：${error.message}`);
     } finally {
       setBusy(false);
@@ -463,7 +884,14 @@
     });
 
     state.activeSessionId = payload.session_id || state.activeSessionId;
-    assistantBubble.innerHTML = renderMarkdown(payload.message || "没有返回可展示内容。");
+    if (state.activeSessionId) {
+      localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
+      if (state.activeSession) {
+        state.activeSession.id = state.activeSessionId;
+      }
+    }
+    setBubbleContent(assistantBubble, "assistant", payload.message || "没有返回可展示内容。");
+    rememberMessage("assistant", payload.message || "");
     renderRuntime(payload.runtime);
     els.elapsedText.textContent = formatElapsed(payload.elapsed);
   }
@@ -486,7 +914,7 @@
 
     if (!response.body) {
       const text = await response.text();
-      assistantBubble.innerHTML = renderMarkdown(text || "浏览器不支持流式读取。");
+      setBubbleContent(assistantBubble, "assistant", text || "浏览器不支持流式读取。");
       return;
     }
 
@@ -510,6 +938,10 @@
             sawFinal = handleStreamEvent(payload, assistantBubble) || sawFinal;
             if (payload.session_id) {
               state.activeSessionId = payload.session_id;
+              localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
+              if (state.activeSession) {
+                state.activeSession.id = state.activeSessionId;
+              }
             }
             if (payload.type === "final") {
               finalAnswer = payload.answer || finalAnswer;
@@ -530,6 +962,10 @@
         sawFinal = handleStreamEvent(payload, assistantBubble) || sawFinal;
         if (payload.session_id) {
           state.activeSessionId = payload.session_id;
+          localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
+          if (state.activeSession) {
+            state.activeSession.id = state.activeSessionId;
+          }
         }
         if (payload.type === "final") {
           finalAnswer = payload.answer || finalAnswer;
@@ -538,7 +974,8 @@
     }
 
     if (!sawFinal) {
-      assistantBubble.innerHTML = renderMarkdown(finalAnswer || "流式响应已结束，但没有收到 final 事件。");
+      setBubbleContent(assistantBubble, "assistant", finalAnswer || "流式响应已结束，但没有收到 final 事件。");
+      rememberMessage("assistant", finalAnswer || "");
     }
   }
 
@@ -580,7 +1017,7 @@
 
     if (payload.type === "error") {
       const message = payload.detail || "运行时发生错误";
-      assistantBubble.innerHTML = renderMarkdown(`运行失败：${message}`);
+      setBubbleContent(assistantBubble, "assistant", `运行失败：${message}`);
       throw new Error(message);
     }
 
@@ -588,21 +1025,22 @@
       const baseText = payload.reset ? "" : assistantBubble.dataset.streamText || "";
       const nextText = payload.answer || `${baseText}${payload.delta || ""}`;
       assistantBubble.dataset.streamText = nextText;
-      assistantBubble.innerHTML = renderMarkdown(nextText);
+      setBubbleContent(assistantBubble, "assistant", nextText, { actions: false });
       scrollMessagesToBottom();
       return false;
     }
 
     if (payload.type === "node_update" && payload.answer) {
       assistantBubble.dataset.streamText = payload.answer;
-      assistantBubble.innerHTML = renderMarkdown(payload.answer);
+      setBubbleContent(assistantBubble, "assistant", payload.answer, { actions: false });
       scrollMessagesToBottom();
       return false;
     }
 
     if (payload.type === "final") {
       assistantBubble.dataset.streamText = payload.answer || "";
-      assistantBubble.innerHTML = renderMarkdown(payload.answer || "没有返回可展示内容。");
+      setBubbleContent(assistantBubble, "assistant", payload.answer || "没有返回可展示内容。");
+      rememberMessage("assistant", payload.answer || "");
       scrollMessagesToBottom();
       return true;
     }
@@ -627,19 +1065,145 @@
     avatar.className = "avatar";
     avatar.textContent = role === "user" ? "你" : "行";
 
+    const body = document.createElement("div");
+    body.className = "message-body";
+
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    bubble.innerHTML = pending
-      ? '<span class="typing" aria-label="正在输入"><span></span><span></span><span></span></span>'
-      : renderMarkdown(content);
-
-    message.append(avatar, bubble);
+    body.appendChild(bubble);
+    message.append(avatar, body);
     els.messageList.appendChild(message);
+    setBubbleContent(bubble, role, content, { pending, actions: !pending });
     scrollMessagesToBottom();
     return bubble;
   }
 
+  function setBubbleContent(bubble, role, content, options = {}) {
+    const pending = Boolean(options.pending);
+    const actions = options.actions !== false;
+    const text = String(content || "");
+    bubble.dataset.rawContent = pending ? "" : text;
+    bubble.innerHTML = pending
+      ? '<span class="typing" aria-label="正在输入"><span></span><span></span><span></span></span>'
+      : renderMarkdown(text);
+    renderResultActions(bubble, role, text, actions && !pending);
+  }
+
+  function renderResultActions(bubble, role, content, shouldRender) {
+    const body = bubble.parentElement;
+    if (!body) {
+      return;
+    }
+    body.querySelector(".result-actions")?.remove();
+    if (!shouldRender || role !== "assistant" || !isItineraryContent(content)) {
+      return;
+    }
+
+    state.latestItineraryMarkdown = content;
+    renderTripSummaryPanel();
+
+    const actions = document.createElement("div");
+    actions.className = "result-actions";
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.textContent = "复制";
+    copyButton.addEventListener("click", () => copyMarkdown(content));
+
+    const exportButton = document.createElement("button");
+    exportButton.type = "button";
+    exportButton.textContent = "导出 MD";
+    exportButton.addEventListener("click", () => exportMarkdown(content));
+
+    actions.append(copyButton, exportButton);
+    body.appendChild(actions);
+  }
+
+  function rememberMessage(role, content) {
+    if (!content) {
+      return;
+    }
+    if (!state.activeSession) {
+      state.activeSession = {
+        id: state.activeSessionId,
+        title: "新会话",
+        messages: [],
+      };
+    }
+    state.activeSession.messages = [...(state.activeSession.messages || []), { role, content }];
+  }
+
+  function isItineraryContent(content) {
+    const text = String(content || "");
+    return /^#\s+.+行程/m.test(text) || /^##\s+Day\s*\d+/im.test(text) || /##\s+行程概览/.test(text);
+  }
+
+  async function copyMarkdown(content) {
+    const text = String(content || "").trim();
+    if (!text) {
+      showToast("还没有可复制的行程");
+      return;
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        fallbackCopyText(text);
+      }
+      showToast("行程 Markdown 已复制");
+    } catch (error) {
+      fallbackCopyText(text);
+      showToast("行程 Markdown 已复制");
+    }
+  }
+
+  function fallbackCopyText(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+
+  function exportMarkdown(content) {
+    const text = String(content || "").trim();
+    if (!text) {
+      showToast("还没有可导出的行程");
+      return;
+    }
+    const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${slugifyFilename(getItineraryTitle(text) || "行程规划")}.md`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast("已导出 Markdown");
+  }
+
+  function getItineraryTitle(content) {
+    const text = String(content || "");
+    return text.match(/^#\s+(.+)$/m)?.[1]?.trim() || "";
+  }
+
+  function slugifyFilename(value) {
+    const filename = String(value || "行程规划")
+      .trim()
+      .replace(/[\\/:*?"<>|]/g, "-")
+      .replace(/\s+/g, "-")
+      .slice(0, 48);
+    return filename || "行程规划";
+  }
+
   function renderMessages(messages) {
+    state.shouldAutoScroll = true;
+    state.latestItineraryMarkdown = "";
     els.messageList.innerHTML = "";
     if (!messages.length) {
       els.messageList.innerHTML = `
@@ -648,12 +1212,15 @@
           <p>说目的地、日期、天数、同行人和偏好，我会帮你整理成清楚的路线。</p>
         </div>
       `;
+      renderTripSummaryPanel();
       return;
     }
 
     messages.forEach((message) => {
       appendMessage(message.role === "user" ? "user" : "assistant", message.content || "");
     });
+    renderTripSummaryPanel();
+    scrollMessagesToBottom(true);
   }
 
   function renderRuntime(runtime) {
@@ -757,8 +1324,8 @@
     state.isBusy = isBusy;
     els.sendBtn.disabled = isBusy;
     els.attachBtn.disabled = isBusy;
-    els.newSessionBtn.disabled = isBusy;
-    els.clearSessionBtn.disabled = isBusy || !state.activeSessionId;
+    els.newSessionBtn.disabled = false;
+    els.clearSessionBtn.disabled = !state.activeSessionId;
     els.sendBtn.textContent = isBusy ? "整理中..." : "发送";
   }
 
@@ -770,7 +1337,7 @@
       return "正在处理，请稍等";
     }
     if (note.includes("由路由策略跳过")) {
-      return "这次需求不需要此步骤";
+      return "本次请求无需此步骤";
     }
     if (stepKey === "router") {
       const intent = note.match(/intent=([^,\s]+)/)?.[1];
@@ -796,7 +1363,10 @@
     textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
   }
 
-  function scrollMessagesToBottom() {
+  function scrollMessagesToBottom(force = false) {
+    if (!force && !state.shouldAutoScroll) {
+      return;
+    }
     requestAnimationFrame(() => {
       els.messageList.scrollTop = els.messageList.scrollHeight;
     });
@@ -839,6 +1409,7 @@
     const html = [];
     let paragraph = [];
     let list = null;
+    let openSection = null;
 
     const flushParagraph = () => {
       if (!paragraph.length) {
@@ -856,6 +1427,32 @@
       list = null;
     };
 
+    const closeSection = () => {
+      if (openSection) {
+        html.push("</section>");
+        openSection = null;
+      }
+    };
+
+    const sectionClassForHeading = (level, title) => {
+      if (level === 2 && /^Day\s*\d+/i.test(title)) {
+        return "itinerary-section itinerary-day";
+      }
+      if (level === 2 && /行程概览/.test(title)) {
+        return "itinerary-section itinerary-overview";
+      }
+      if (level === 2 && /注意事项/.test(title)) {
+        return "itinerary-section itinerary-notes";
+      }
+      if (level === 2 && /预算/.test(title)) {
+        return "itinerary-section itinerary-budget";
+      }
+      if (level === 3 && /上午|下午|晚上|餐饮建议/.test(title)) {
+        return "itinerary-section itinerary-slot";
+      }
+      return "";
+    };
+
     lines.forEach((line) => {
       const trimmed = line.trim();
 
@@ -865,12 +1462,39 @@
         return;
       }
 
+      if (/^📅\s*日期[：:]/.test(trimmed)) {
+        flushParagraph();
+        flushList();
+        html.push(`<p class="itinerary-meta">${renderInline(trimmed)}</p>`);
+        return;
+      }
+
+      if (/^本日概要[：:]/.test(trimmed)) {
+        flushParagraph();
+        flushList();
+        html.push(`<p class="itinerary-day-summary">${renderInline(trimmed)}</p>`);
+        return;
+      }
+
       const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
       if (heading) {
         flushParagraph();
         flushList();
         const level = heading[1].length;
-        html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+        const title = heading[2];
+        const sectionClass = sectionClassForHeading(level, title);
+        if (sectionClass) {
+          closeSection();
+          html.push(`<section class="${sectionClass}">`);
+          openSection = sectionClass;
+        } else if (level <= 2) {
+          closeSection();
+        }
+        if (level === 1) {
+          html.push(`<div class="itinerary-hero"><span>行程方案</span><h1>${renderInline(title)}</h1></div>`);
+        } else {
+          html.push(`<h${level}>${renderInline(title)}</h${level}>`);
+        }
         return;
       }
 
@@ -893,6 +1517,7 @@
 
     flushParagraph();
     flushList();
+    closeSection();
     return html.join("");
   }
 

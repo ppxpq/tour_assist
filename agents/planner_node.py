@@ -131,6 +131,12 @@ def _parse_raw_materials(raw: str) -> str:
     return "\n\n".join(sections) if sections else text
 
 
+def _extract_budget_level(text: str) -> str:
+    """Extract budget level from the natural-language prompt assembled by the frontend."""
+    match = re.search(r"预算[：:\s]*(经济|舒适|品质)", text or "")
+    return match.group(1) if match else ""
+
+
 def planner_agent(state: TravelState) -> dict:
     """根据 researcher 汇总素材，生成最终行程文本。"""
     intent = (state.get("intent") or "").strip().lower()
@@ -142,6 +148,7 @@ def planner_agent(state: TravelState) -> dict:
     travel_mode = (state.get("travel_mode") or "").strip()
     raw_materials = (state.get("raw_materials") or "").strip()
     tool_failures: list[dict] = state.get("tool_failures") or []
+    budget_level = _extract_budget_level(user_query)
 
     if not city:
         return {
@@ -173,32 +180,50 @@ def planner_agent(state: TravelState) -> dict:
     if travel_mode:
         travel_mode_section = f"- 出行方式：{travel_mode}"
 
+    budget_section = f"- 预算档位：{budget_level}" if budget_level else "- 预算档位：未指定"
+    budget_requirement = (
+        f'最后给出"注意事项"与"预算安排"，预算安排只围绕用户已选择的「{budget_level}」档位展开，'
+        "不要再输出低/中/高三档对比。"
+        if budget_level
+        else '最后给出"注意事项"与"预算建议（低/中/高三档）"。'
+    )
+
     prompt = f"""
 你是一位资深旅游规划师。今天是 {today_str}。请基于提供的资料，生成可执行的 {city} 行程方案。
 
 【用户约束】
+- 原始需求：{user_query or '未提供'}
 - 目的地：{city}
 - 天数：{days if days > 0 else '未指定'}
 - 出发日期：{start_date if start_date else '未指定'}
 - 偏好：{preference}
 {travel_mode_section}
+{budget_section}
 
 【已采集资料】
 {formatted_materials}
 {availability_section}
 【输出要求】
-1. 使用 Markdown。
-2. 按天拆分；每一天包含上午、下午、晚上。
-3. 每天开头必须标注「日期 + 天气预报信息」 ，格式固定为：「📅 日期：XXXX 年 XX 月 XX 日 | 🌤 天气：晴转多云，15-23℃」（日期格式统一为 “XXXX 年 XX 月 XX 日”，天气预报需包含天气状况、温度范围）。{f"出发日期为 {start_date}，请从该日期开始依次推算每一天的具体日期。" if start_date else ""}
-4. **天气适配规则（重要）**：
+1. 使用 Markdown，但必须严格按下面的标题结构输出，便于前端卡片化展示：
+   - 一级标题：# {city} {days if days > 0 else ''}日行程
+   - 二级标题：## 行程概览
+   - 二级标题：## Day 1 · 真实当日主题概要
+   - 三级标题：### 上午 / ### 下午 / ### 晚上 / ### 餐饮建议
+   - 二级标题：## 注意事项
+   - 二级标题：## 预算安排 或 ## 预算建议
+2. 「行程概览」必须包含：主题、强度、适合人群、交通策略、预算档位（如有）。
+3. 按天拆分；每一天包含上午、下午、晚上。每个 Day 标题必须根据当天核心路线生成 8-16 字主题概要，例如「老城文化与夜游美食」「太湖风光与园林慢游」，严禁输出「当天主题」「主题待定」「综合游览」等占位词或泛词。
+4. 每个 Day 标题下第一行必须标注「日期 + 天气预报信息」 ，格式固定为：「📅 日期：XXXX 年 XX 月 XX 日 | 🌤 天气：晴转多云，15-23℃」（日期格式统一为 “XXXX 年 XX 月 XX 日”，天气预报需包含天气状况、温度范围）。{f"出发日期为 {start_date}，请从该日期开始依次推算每一天的具体日期。" if start_date else ""}
+   第二行必须给出「本日概要：一句话说明主要动线、体验重点和行程节奏」，例如：「本日概要：上午集中游览老城文化点位，下午转向运河街区，晚上以本地餐饮和夜景收尾。」
+5. 每个上午/下午/晚上时间段必须用列表给出以下字段：地点/活动、推荐理由、建议停留、交通建议。
+6. **天气适配规则（重要）**：
    - 如果某天预报有雨、雪、雷暴、冰雹、大雾、霾、沙尘等恶劣天气，该天的上午/下午时段**必须安排室内活动**（如博物馆、室内景点、商场、美食探店、文化体验等），避免安排户外徒步、公园游览、户外拍照等。
    - 恶劣天气的晚上可以安排室内餐饮或演出。
    - 仅在天气良好时才推荐户外景点和活动。
-5. 每个时间段给出：地点/活动、推荐理由、建议停留时长、交通建议。
-6. 每天补充 1-2 个餐饮建议。
-7. 最后给出"注意事项"与"预算建议（低/中/高三档）"。
-8. 不要编造资料中完全不存在的硬性事实；不确定信息用"建议/可考虑"表述。
-9. **交通建议要求**：
+7. 每天补充 1-2 个餐饮建议。
+8. {budget_requirement}
+9. 不要编造资料中完全不存在的硬性事实；不确定信息用"建议/可考虑"表述。
+10. **交通建议要求**：
    - 如果出行方式是自驾，请在交通建议中说明驾车路线和预计行驶时间。
 """
 

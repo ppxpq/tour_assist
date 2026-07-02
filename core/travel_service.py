@@ -40,6 +40,7 @@ MEDIA_PATH_RE = re.compile(
 )
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".webm"}
+LOW_QUALITY_TITLE_RE = re.compile(r"^(新会话|我想|帮我|请帮|查询|根据|用户上传)")
 
 
 @dataclass(slots=True)
@@ -258,6 +259,179 @@ def _short_title(prompt: str) -> str:
     return compact[:18]
 
 
+def _clean_title_part(text: str, limit: int = 8) -> str:
+    cleaned = re.sub(r"\s+", "", text or "")
+    cleaned = re.sub(r"[。！？；;，,].*$", "", cleaned)
+    return cleaned[:limit]
+
+
+CN_NUMBER_MAP = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
+
+def _parse_title_number(raw: str) -> int:
+    raw = (raw or "").strip()
+    if raw.isdigit():
+        return int(raw)
+    if raw in CN_NUMBER_MAP:
+        return CN_NUMBER_MAP[raw]
+    if "十" in raw:
+        left, _, right = raw.partition("十")
+        tens = CN_NUMBER_MAP.get(left, 1 if not left else 0)
+        ones = CN_NUMBER_MAP.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return 0
+
+
+def _extract_current_title_parts(title: str) -> tuple[str, str, str]:
+    """Return city, days, theme from an existing generated title when possible."""
+    match = re.match(r"(?P<city>[^ ·]+)\s+(?P<days>\d+)日(?:\s*·\s*(?P<theme>.+))?", title or "")
+    if not match:
+        return "", "", ""
+    return match.group("city") or "", match.group("days") or "", match.group("theme") or ""
+
+
+def _extract_trip_title(prompt: str, current_title: str = "") -> str:
+    text = re.sub(r"\s+", " ", prompt or "").strip()
+    if not text:
+        return ""
+
+    old_city, old_days, old_theme = _extract_current_title_parts(current_title)
+
+    city = ""
+    for pattern in (
+        r"目的地[：:\s]*([^\n。；;，,]+)",
+        r"我想去([^\n。；;，,]+?)(?:[，,\s]*(?:玩|旅游|旅行|出发)|$)",
+        r"想去([^\n。；;，,]+?)(?:[，,\s]*(?:玩|旅游|旅行|出发)|$)",
+        r"去([^\n。；;，,]+?)(?:[，,\s]*(?:玩|旅游|旅行|出发)|$)",
+        r"去([^\n。；;，,]+?)(?:\d{1,2}|[一二两三四五六七八九十]+)\s*(?:天|日|周)",
+        r"换成([^\n。；;，,]+)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            city = _clean_title_part(match.group(1), 6)
+            break
+    city = city or old_city
+
+    days = ""
+    for pattern in (
+        r"玩\s*(\d{1,2})\s*天",
+        r"(\d{1,2})\s*[天日]",
+        r"改成\s*(\d{1,2})\s*天",
+        r"([一二两三四五六七八九十]+)\s*[天日]",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            days_number = _parse_title_number(match.group(1))
+            days = str(days_number) if days_number else match.group(1)
+            break
+    if not days:
+        week_match = re.search(r"(\d{1,2}|[一二两三四五六七八九十]+)\s*周", text)
+        if week_match:
+            week_number = _parse_title_number(week_match.group(1))
+            if week_number:
+                days = str(min(30, week_number * 7))
+    days = days or old_days
+
+    theme = ""
+    preference_match = re.search(r"偏好[：:\s]*([^\n。]+)", text)
+    if preference_match:
+        raw_items = re.split(r"[、,+，,\s]+", preference_match.group(1))
+        theme = "".join(_clean_title_part(item, 3) for item in raw_items if item and item != "未指定")[:8]
+
+    if not theme:
+        travelers_match = re.search(r"同行人[：:\s]*([^\n。]+)", text)
+        if travelers_match:
+            raw_items = re.split(r"[、,+，,\s]+", travelers_match.group(1))
+            theme = "".join(_clean_title_part(item, 3) for item in raw_items if item and item != "未指定")[:8]
+
+    if not theme:
+        preference_words = ("美食", "人文", "自然", "摄影", "休闲", "小众", "省钱", "购物", "夜游", "亲子", "家庭", "老人")
+        matched_words = [word for word in preference_words if word in text]
+        theme = "".join(matched_words[:3])[:8]
+
+    theme = theme or old_theme
+
+    if city and days:
+        return f"{city} {days}日" + (f" · {theme}" if theme else "")
+
+    ticket_match = None
+    if re.search(r"车票|高铁票|火车票|动车票|余票|查票|抢票|候补|12306", text):
+        ticket_text = re.sub(r"\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?", "", text)
+        ticket_text = re.sub(r"(?:帮我)?(?:查询|查一下|查|看看|看一下)", "", ticket_text)
+        for pattern in (
+            r"从(?P<departure>[\u4e00-\u9fa5A-Za-z]{1,8})到(?P<destination>[\u4e00-\u9fa5A-Za-z]{1,8}?)(?:的)?(?:高铁票|火车票|动车票|车票|票)",
+            r"(?:^|[，。,.\s])(?P<departure>[\u4e00-\u9fa5A-Za-z]{1,8})到(?P<destination>[\u4e00-\u9fa5A-Za-z]{1,8}?)(?:的)?(?:高铁票|火车票|动车票|车票|票)",
+        ):
+            ticket_match = re.search(pattern, ticket_text)
+            if ticket_match:
+                break
+    if ticket_match:
+        departure = _clean_title_part(ticket_match.group("departure"), 5)
+        destination = _clean_title_part(ticket_match.group("destination"), 5)
+        if departure and destination:
+            return f"{departure}到{destination}车票"
+
+    return ""
+
+
+def _is_low_quality_title(title: str) -> bool:
+    compact = re.sub(r"\s+", "", title or "")
+    return not compact or bool(LOW_QUALITY_TITLE_RE.match(compact)) or len(compact) > 18
+
+
+def _compact_title_theme(preference: str) -> str:
+    parts = [part for part in re.split(r"[、,+，,\s]+", preference or "") if part and part not in {"综合", "未指定"}]
+    return "".join(_clean_title_part(part, 3) for part in parts)[:8]
+
+
+def _build_title_from_node_update(node: str, update: dict[str, Any]) -> str:
+    if node == "router":
+        intent = str(update.get("intent") or "").strip().lower()
+        city = _clean_title_part(str(update.get("city") or ""), 8)
+        days = int(update.get("days") or 0)
+        preference = _compact_title_theme(str(update.get("preference") or ""))
+
+        if intent in {"need_plan", "need_more_info"} and city and days > 0:
+            return f"{city} {days}日" + (f" · {preference}" if preference else "")
+        if intent == "need_answer" and city:
+            return f"{city}旅行问答"
+
+    if node == "ticket_agent":
+        departure = _clean_title_part(str(update.get("departure") or ""), 6)
+        destination = _clean_title_part(str(update.get("city") or ""), 6)
+        if departure and destination:
+            return f"{departure}到{destination}车票"
+
+    return ""
+
+
+def _title_score(title: str) -> int:
+    if not title or title == "新会话":
+        return 0
+    score = 1
+    if re.search(r"\d+日", title):
+        score += 2
+    if " · " in title:
+        score += 1
+    if "车票" in title or "问答" in title:
+        score += 2
+    if _is_low_quality_title(title):
+        score -= 1
+    return score
+
+
 class TravelService:
     def __init__(self) -> None:
         config.init_env()
@@ -316,10 +490,55 @@ class TravelService:
             summary = self._session_store.get_session_summary(session_id)
             if summary is None:
                 raise KeyError(session_id)
-            should_update_title = role == "user" and int(summary.get("message_count") or 0) == 0
             self._session_store.add_message(session_id, role, content)
-            if should_update_title:
-                self._session_store.update_session(session_id, title=_short_title(content))
+
+    def _apply_session_title_candidate(self, session_id: str, candidate: str) -> None:
+        candidate = (candidate or "").strip()
+        if not candidate:
+            return
+        with self._lock:
+            summary = self._session_store.get_session_summary(session_id)
+            if summary is None:
+                return
+            current_title = str(summary.get("title") or "")
+            if candidate == current_title:
+                return
+            if _title_score(candidate) >= _title_score(current_title):
+                self._session_store.update_session(session_id, title=candidate)
+
+    def _maybe_update_session_title(
+        self,
+        session_id: str,
+        prompt: str,
+        current_title: str,
+        previous_message_count: int,
+    ) -> None:
+        candidate = _extract_trip_title(prompt, current_title)
+        if not candidate and _is_low_quality_title(current_title):
+            try:
+                messages = self._session_store.get_session_messages(session_id)
+                recent_user_messages = [
+                    msg.get("content", "")
+                    for msg in messages[-8:]
+                    if msg.get("role") == "user"
+                ]
+                for recent_user_text in reversed(recent_user_messages):
+                    candidate = _extract_trip_title(recent_user_text, current_title)
+                    if candidate:
+                        break
+                if not candidate:
+                    candidate = _extract_trip_title("\n".join(recent_user_messages), current_title)
+            except Exception:
+                candidate = ""
+
+        if candidate and candidate != current_title:
+            self._session_store.update_session(session_id, title=candidate)
+            return
+
+        if previous_message_count == 0 and _is_low_quality_title(current_title):
+            fallback = _short_title(prompt)
+            if fallback and fallback != current_title:
+                self._session_store.update_session(session_id, title=fallback)
 
     def _cleanup_session_media(self, messages: list[dict[str, str]]) -> None:
         seen: set[str] = set()
@@ -473,10 +692,12 @@ class TravelService:
                         final_text = maybe_text
 
                     elapsed = time.perf_counter() - started_at
+                    title_candidate = _build_title_from_node_update(node_name, update)
                     yield {
                         "type": "node_update",
                         "node": node_name,
                         "answer": maybe_text or None,
+                        "title_candidate": title_candidate or None,
                         "runtime": _runtime_snapshot(runtime),
                         "elapsed": round(elapsed, 3),
                     }
@@ -535,6 +756,11 @@ class TravelService:
         for event in self.iter_graph_events(prompt, chat_history, model or DEFAULT_MODEL):
             if event["type"] == "node_update":
                 node_events.append(event)
+                if persist and resolved_session_id:
+                    self._apply_session_title_candidate(
+                        resolved_session_id,
+                        str(event.get("title_candidate") or ""),
+                    )
             elif event["type"] == "final":
                 final_payload = event
 
@@ -583,6 +809,11 @@ class TravelService:
         try:
             for event in self.iter_graph_events(prompt, chat_history, model or DEFAULT_MODEL):
                 event["session_id"] = resolved_session_id
+                if event["type"] == "node_update" and persist and resolved_session_id:
+                    self._apply_session_title_candidate(
+                        resolved_session_id,
+                        str(event.get("title_candidate") or ""),
+                    )
                 if event["type"] == "final":
                     final_answer = str(event.get("answer") or "")
                 yield event

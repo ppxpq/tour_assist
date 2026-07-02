@@ -34,6 +34,21 @@ RAIL_TICKET_HINT_RE = re.compile(
 NON_TRAIN_TICKET_RE = re.compile(
     r"机票|船票|汽车票|门票|景区|演出票|演唱会|电影票|电影|迪士尼"
 )
+TAG_QUESTION_RE = re.compile(r"什么意思|是什么|是啥|区别|怎么选|如何选|解释|含义")
+TAG_EXPLANATIONS: dict[str, str] = {
+    "经济": "经济预算会优先控制总花费，更多使用公共交通、平价餐饮、免费或低价景点，适合学生党或想压低预算的旅行。",
+    "舒适": "舒适预算会在花费和体验之间平衡，减少过度折腾，适当选择更省力的交通、更稳妥的餐饮和节奏更舒服的安排。",
+    "品质": "品质预算更重视体验质量，会减少排队和转场，优先考虑更好的餐饮、住宿、交通或特色体验。",
+    "少走路": "少走路表示行程会控制步行距离，景点尽量集中，必要时用打车或短途接驳替代长距离步行。",
+    "步行友好": "步行友好表示你可以接受较多步行，适合老街、湖区、街区漫游等慢游路线。",
+    "无障碍优先": "无障碍优先会优先考虑老人、轮椅、婴儿车等需求，减少台阶，增加休息点，并尽量选择交通和动线更顺的景点。",
+    "骑行": "骑行适合城市慢游、绿道、湖区或短距离点位串联，规划时会避免安排不适合骑车的长距离或复杂路段。",
+    "打车": "打车偏好会减少换乘和步行，适合亲子、老人同行、赶时间或不想折腾的行程。",
+    "公共交通": "公共交通偏好会优先考虑地铁、公交等方式，通常更省钱，但可能需要更多换乘和步行。",
+    "自驾/租车": "自驾/租车适合郊区、多点位、跨城或公共交通不方便的路线，但需要考虑停车、限行和驾驶疲劳。",
+    "老人": "老人同行会让规划更关注少走路、休息频率、无障碍、就近餐饮和服务点，避免过密转场。",
+    "亲子": "亲子同行会更关注安全、节奏、餐饮便利度、洗手间和适合儿童的体验，避免过度赶路。",
+}
 
 MISSING_FIELD_LABELS: dict[str, str] = {
     "city": "目的地城市",
@@ -129,6 +144,27 @@ def _looks_like_ticket_query(text: str) -> bool:
     return bool(TICKET_QUERY_RE.search(normalized))
 
 
+def _tag_explanation_answer(text: str) -> str:
+    normalized = re.sub(r"\s+", "", text or "")
+    if not normalized or not TAG_QUESTION_RE.search(normalized):
+        return ""
+
+    matched = [name for name in TAG_EXPLANATIONS if name in normalized]
+    if "预算" in normalized and not matched:
+        matched = ["经济", "舒适", "品质"]
+    if "交通" in normalized and not matched:
+        matched = ["公共交通", "打车", "自驾/租车", "骑行", "步行友好", "少走路", "无障碍优先"]
+
+    if not matched:
+        return ""
+
+    lines = ["这些标签是为了帮我更准确地控制行程节奏和推荐方式："]
+    for name in matched:
+        lines.append(f"- **{name}**：{TAG_EXPLANATIONS[name]}")
+    lines.append("你也可以不选标签，直接用自然语言告诉我你的真实情况。")
+    return "\n".join(lines)
+
+
 def router_agent(state: TravelState) -> dict:
     messages: list[BaseMessage] = list(state.get("messages", []))
     user_texts = human_texts(messages)
@@ -149,6 +185,20 @@ def router_agent(state: TravelState) -> dict:
                     content="你好，告诉我你想去哪里、玩几天、从哪天出发，以及更偏好的旅行风格，我就可以开始帮你规划。"
                 )
             ],
+        }
+
+    tag_answer = _tag_explanation_answer(user_input)
+    if tag_answer:
+        return {
+            "intent": "general_chat",
+            "city": (state.get("city") or "").strip(),
+            "days": _sanitize_days(state.get("days", 0)),
+            "start_date": (state.get("start_date") or "").strip(),
+            "preference": (state.get("preference") or "").strip(),
+            "missing_fields": [],
+            "router_reason": "tag_explanation",
+            "user_query": user_input,
+            "messages": [AIMessage(content=tag_answer)],
         }
 
     if _looks_like_ticket_query(user_input):
@@ -196,8 +246,10 @@ def router_agent(state: TravelState) -> dict:
         )
         raw_text = response.content if hasattr(response, "content") else str(response)
         parsed = _safe_parse_json(raw_text)
-    except Exception:
+        llm_error = ""
+    except Exception as exc:
         parsed = None
+        llm_error = str(exc)
 
     if parsed is None:
         return {
@@ -209,6 +261,15 @@ def router_agent(state: TravelState) -> dict:
             "missing_fields": [],
             "router_reason": "llm_parse_failed",
             "user_query": user_input,
+            "messages": [
+                AIMessage(
+                    content=(
+                        "模型调用或意图解析失败，暂时无法继续规划。"
+                        "请先确认 `api_key.env` 中已配置可用的 `ZHIPU_API_KEY`。"
+                        + (f"\n\n错误信息：{llm_error}" if llm_error else "")
+                    )
+                )
+            ],
         }
 
     state_city = (state.get("city") or "").strip()

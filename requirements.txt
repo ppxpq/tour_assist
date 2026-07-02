@@ -4,6 +4,7 @@ python-multipart
 python-dotenv
 requests
 openai
+mcp
 
 langchain-core
 langchain-openai
