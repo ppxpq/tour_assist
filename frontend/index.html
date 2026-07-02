@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>行迹规划</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="旅行记录与资料库">
+        <header class="brand">
+          <div class="brand-mark">行</div>
+          <div>
+            <h1>行迹规划</h1>
+            <p>把旅行想法整理成路线</p>
+          </div>
+        </header>
+
+        <section class="panel">
+          <label class="field-label" for="apiBaseInput">服务地址</label>
+          <div class="inline-control">
+            <input id="apiBaseInput" type="url" value="http://127.0.0.1:8000" spellcheck="false" />
+            <button id="saveApiBaseBtn" type="button">保存</button>
+          </div>
+          <div id="healthStatus" class="status-pill status-muted">未连接</div>
+        </section>
+
+        <section class="panel panel-grow">
+          <div class="section-title">
+            <h2>旅行记录</h2>
+            <button id="newSessionBtn" class="icon-button" type="button" title="新建记录" aria-label="新建记录">
+              +
+            </button>
+          </div>
+          <div id="sessionList" class="session-list" aria-live="polite"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>资料库</h2>
+            <span id="kbBadge" class="mini-badge">未加载</span>
+          </div>
+          <p id="kbStatusText" class="muted-text">上传攻略、笔记或表格，规划时会一起参考。</p>
+          <input id="kbFileInput" class="hidden-input" type="file" multiple accept=".pdf,.txt,.docx,.csv" />
+          <div class="button-row">
+            <button id="uploadKbBtn" class="secondary-button" type="button">上传文档</button>
+            <button id="clearKbBtn" class="ghost-button" type="button">清空</button>
+          </div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button id="sidebarToggleBtn" class="icon-button mobile-only" type="button" aria-label="打开菜单">
+            ☰
+          </button>
+          <div>
+            <h2 id="activeSessionTitle">新会话</h2>
+            <p id="activeSessionMeta">选择一条记录，继续完善路线</p>
+          </div>
+          <div class="model-control">
+            <label for="modelSelect">规划模型</label>
+            <select id="modelSelect"></select>
+          </div>
+        </header>
+
+        <section class="workspace">
+          <div class="chat-column">
+            <div id="messageList" class="message-list" aria-live="polite">
+              <div class="empty-state">
+                <h2>你想怎么出发？</h2>
+                <p>说目的地、日期、天数、同行人和偏好，我会帮你整理成清楚的路线。</p>
+              </div>
+            </div>
+
+            <form id="chatForm" class="composer">
+              <section class="trip-builder" aria-label="快速描述出行需求">
+                <div class="trip-builder-head">
+                  <button id="tripBuilderToggleBtn" class="trip-builder-toggle" type="button" aria-expanded="false">
+                    <span class="toggle-caret">▸</span>
+                    <span>
+                      <strong>快速描述需求</strong>
+                      <small id="tripDraftSummary">未选择标签，可直接聊天</small>
+                    </span>
+                  </button>
+                  <div class="trip-builder-actions">
+                    <button id="clearTripDraftBtn" class="ghost-button compact-button" type="button">清空标签</button>
+                  </div>
+                </div>
+
+                <div id="tripBuilderBody" class="trip-builder-body" hidden>
+                  <div class="trip-grid">
+                    <label class="trip-field">
+                      <span>目的地</span>
+                      <input id="tripDestinationInput" type="text" placeholder="例如：无锡" autocomplete="off" />
+                    </label>
+                    <label class="trip-field">
+                      <span>出发日期</span>
+                      <input id="tripStartDateInput" type="date" />
+                    </label>
+                    <label class="trip-field">
+                      <span>出发地</span>
+                      <input id="tripDepartureInput" type="text" placeholder="例如：南京" autocomplete="off" />
+                    </label>
+                  </div>
+
+                  <div class="trip-row">
+                  <span class="trip-row-label">天数</span>
+                  <div class="trip-inline">
+                    <div class="trip-tags" data-trip-group="days">
+                      <button type="button" data-trip-field="days" data-trip-value="1天">1天</button>
+                      <button type="button" data-trip-field="days" data-trip-value="2天">2天</button>
+                      <button type="button" data-trip-field="days" data-trip-value="3天">3天</button>
+                      <button type="button" data-trip-field="days" data-trip-value="4天">4天</button>
+                    </div>
+                    <label class="days-custom">
+                      <span>自定义</span>
+                      <input id="tripDaysInput" type="number" min="5" max="30" inputmode="numeric" placeholder="5+" />
+                      <span>天</span>
+                    </label>
+                  </div>
+                  </div>
+
+                  <div class="trip-row">
+                  <span class="trip-row-label">同行</span>
+                  <div class="trip-tags" data-trip-group="travelers">
+                    <button type="button" data-trip-field="travelers" data-trip-value="独自">独自</button>
+                    <button type="button" data-trip-field="travelers" data-trip-value="朋友">朋友</button>
+                    <button type="button" data-trip-field="travelers" data-trip-value="情侣">情侣</button>
+                    <button type="button" data-trip-field="travelers" data-trip-value="亲子" title="亲子：更关注安全、节奏、餐饮便利度和适合儿童的体验">亲子</button>
+                    <button type="button" data-trip-field="travelers" data-trip-value="家庭">家庭</button>
+                    <button type="button" data-trip-field="travelers" data-trip-value="老人" title="老人：减少步行和转场，关注休息点、无障碍和就近服务">老人</button>
+                  </div>
+                  </div>
+
+                  <div class="trip-row">
+                  <span class="trip-row-label">偏好</span>
+                  <div class="trip-tags" data-trip-group="preferences">
+                    <button type="button" data-trip-field="preferences" data-trip-value="美食">美食</button>
+                    <button type="button" data-trip-field="preferences" data-trip-value="人文">人文</button>
+                    <button type="button" data-trip-field="preferences" data-trip-value="自然">自然</button>
+                    <button type="button" data-trip-field="preferences" data-trip-value="摄影">摄影</button>
+                    <button type="button" data-trip-field="preferences" data-trip-value="休闲">休闲</button>
+                    <button type="button" data-trip-field="preferences" data-trip-value="小众">小众</button>
+                    <button type="button" data-trip-field="preferences" data-trip-value="省钱">省钱</button>
+                    <button type="button" data-trip-field="preferences" data-trip-value="夜游">夜游</button>
+                  </div>
+                  </div>
+
+                  <div class="trip-row">
+                  <span class="trip-row-label">预算</span>
+                  <div class="trip-tags" data-trip-group="budget">
+                    <button type="button" data-trip-field="budget" data-trip-value="经济" title="经济：优先控制总花费，更多使用公共交通、平价餐饮、免费或低价景点">经济</button>
+                    <button type="button" data-trip-field="budget" data-trip-value="舒适" title="舒适：在预算和体验之间平衡，减少过度折腾，适当选择更省力交通和餐饮">舒适</button>
+                    <button type="button" data-trip-field="budget" data-trip-value="品质" title="品质：更重视体验质量，减少排队和转场，可安排更高品质餐饮或体验项目">品质</button>
+                  </div>
+                  </div>
+
+                  <div class="trip-row">
+                  <span class="trip-row-label">到达</span>
+                  <div class="trip-tags" data-trip-group="arrivalMode">
+                    <button type="button" data-trip-field="arrivalMode" data-trip-value="高铁">高铁</button>
+                    <button type="button" data-trip-field="arrivalMode" data-trip-value="火车">火车</button>
+                    <button type="button" data-trip-field="arrivalMode" data-trip-value="飞机">飞机</button>
+                    <button type="button" data-trip-field="arrivalMode" data-trip-value="自驾">自驾</button>
+                    <button type="button" data-trip-field="arrivalMode" data-trip-value="不确定">不确定</button>
+                  </div>
+                  </div>
+
+                  <div class="trip-row">
+                  <span class="trip-row-label">当地交通</span>
+                  <div class="trip-tags" data-trip-group="localMobility">
+                    <button type="button" data-trip-field="localMobility" data-trip-value="公共交通">公共交通</button>
+                    <button type="button" data-trip-field="localMobility" data-trip-value="打车">打车</button>
+                    <button type="button" data-trip-field="localMobility" data-trip-value="自驾/租车">自驾/租车</button>
+                    <button type="button" data-trip-field="localMobility" data-trip-value="骑行" title="骑行：适合城市慢游、湖区、绿道或短距离点位串联">骑行</button>
+                    <button type="button" data-trip-field="localMobility" data-trip-value="步行友好" title="步行友好：可以接受较多步行，适合街区漫游">步行友好</button>
+                    <button type="button" data-trip-field="localMobility" data-trip-value="少走路" title="少走路：减少步行距离，景点尽量集中，必要时打车">少走路</button>
+                    <button type="button" data-trip-field="localMobility" data-trip-value="无障碍优先" title="无障碍优先：考虑老人、轮椅、婴儿车，减少台阶并增加休息点">无障碍优先</button>
+                  </div>
+                  </div>
+                </div>
+              </section>
+
+              <div id="selectedFiles" class="selected-files" aria-live="polite"></div>
+              <div class="composer-main">
+                <button id="attachBtn" class="icon-button" type="button" title="上传图片或语音" aria-label="上传图片或语音">
+                  +
+                </button>
+                <textarea
+                  id="messageInput"
+                  rows="1"
+                  placeholder="例如：5 月底去无锡 4 天，喜欢老城、美食和慢节奏..."
+                  autocomplete="off"
+                ></textarea>
+                <button id="sendBtn" class="send-button" type="submit">发送</button>
+              </div>
+              <input
+                id="chatFileInput"
+                class="hidden-input"
+                type="file"
+                multiple
+                accept="image/*,audio/*,.jpg,.jpeg,.png,.webp,.bmp,.gif,.mp3,.wav,.m4a,.ogg,.webm,.flac,.aac"
+              />
+            </form>
+          </div>
+
+          <div
+            id="columnResizer"
+            class="column-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整聊天区和进度栏宽度"
+            tabindex="0"
+          ></div>
+
+          <aside class="runtime-column" aria-label="规划与摘要">
+            <div class="runtime-header">
+              <div>
+                <h2>规划工作台</h2>
+                <p id="elapsedText">还没有开始</p>
+              </div>
+              <button id="clearSessionBtn" class="ghost-button" type="button">清空记录</button>
+            </div>
+            <div class="runtime-tabs" role="tablist" aria-label="右侧栏视图">
+              <button id="runtimeTabProgress" class="runtime-tab active" type="button" role="tab" aria-selected="true" data-runtime-tab="progress">
+                规划进度
+              </button>
+              <button id="runtimeTabSummary" class="runtime-tab" type="button" role="tab" aria-selected="false" data-runtime-tab="summary">
+                行程摘要
+              </button>
+            </div>
+            <div id="runtimePanelProgress" class="runtime-panel active" role="tabpanel" aria-labelledby="runtimeTabProgress" data-runtime-panel="progress">
+              <div id="runtimeList" class="runtime-list"></div>
+            </div>
+            <div id="runtimePanelSummary" class="runtime-panel" role="tabpanel" aria-labelledby="runtimeTabSummary" data-runtime-panel="summary">
+              <div id="tripSummaryPanel" class="trip-summary-panel"></div>
+            </div>
+            <div class="quick-prompts">
+              <h3>灵感模板</h3>
+              <button type="button" data-prompt="我想去无锡玩 3 天，5 月 20 日出发，喜欢历史、美食和摄影，请帮我规划行程。">
+                做一份 3 天游玩路线
+              </button>
+              <button type="button" data-prompt="查询明天从无锡到南京的高铁票。">
+                查询车票
+              </button>
+              <button type="button" data-prompt="根据知识库内容，推荐适合亲子游的目的地。">
+                知识库问答
+              </button>
+            </div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
