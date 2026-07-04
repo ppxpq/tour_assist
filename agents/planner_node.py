@@ -132,9 +132,70 @@ def _parse_raw_materials(raw: str) -> str:
 
 
 def _extract_budget_level(text: str) -> str:
-    """Extract budget level from the natural-language prompt assembled by the frontend."""
-    match = re.search(r"预算[：:\s]*(经济|舒适|品质)", text or "")
-    return match.group(1) if match else ""
+    """Extract budget level from the frontend prompt or natural-language input."""
+    normalized = re.sub(r"\s+", "", text or "")
+    if not normalized:
+        return ""
+
+    direct = re.search(r"(?:预算[：:]?|预算)?(经济|舒适|品质)(?:预算)?", normalized)
+    if direct:
+        return direct.group(1)
+
+    aliases = {
+        "低档": "经济",
+        "低预算": "经济",
+        "省钱": "经济",
+        "平价": "经济",
+        "中档": "舒适",
+        "中等": "舒适",
+        "适中": "舒适",
+        "高档": "品质",
+        "高预算": "品质",
+        "高端": "品质",
+    }
+    for keyword, level in aliases.items():
+        if keyword in normalized:
+            return level
+
+    numeric = re.search(r"(?:预算|人均|每人)?(?:约|大概|左右)?(\d{3,5})(?:元|块|rmb)?", normalized, re.IGNORECASE)
+    if numeric and ("预算" in normalized or "人均" in normalized or "元" in normalized or "块" in normalized):
+        amount = int(numeric.group(1))
+        if amount <= 1200:
+            return "经济"
+        if amount <= 2200:
+            return "舒适"
+        return "品质"
+    return ""
+
+
+def _budget_replacement_section(budget_level: str, days: int) -> str:
+    day_text = f"{days}天" if days > 0 else "本次"
+    level_text = f"「{budget_level}」" if budget_level else "当前行程"
+    control_text = f"按用户已选择的 {level_text} 预算控制，只给单一预算方案。" if budget_level else "用户未指定预算档位，只给一版基础估算区间。"
+    return (
+        "## 预算安排\n"
+        f"- 预算口径：{control_text}\n"
+        f"- 费用估算：按{day_text}行程估算人均总花费，需以实际住宿日期、门票政策和交通价格为准。\n"
+        "- 主要构成：住宿、餐饮、城市交通、景点门票和少量机动费用。\n"
+        "- 控制建议：优先保留核心景点和特色餐饮；如果超预算，先压缩住宿等级、打车频次或付费体验项目。"
+    )
+
+
+def _normalize_budget_section(content: str, budget_level: str, days: int) -> str:
+    """Replace forbidden tiered budget output with a single-plan budget section."""
+    if not content:
+        return content
+
+    has_tiered_budget = all(label in content for label in ("低档", "中档", "高档"))
+    has_tiered_wording = bool(re.search(r"低[/／、]中[/／、]高|三档|档位对比", content))
+    if not has_tiered_budget and not has_tiered_wording:
+        return content
+
+    replacement = _budget_replacement_section(budget_level, days)
+    pattern = re.compile(r"(?ms)^##\s*预算(?:安排|建议).*?(?=^##\s+|\Z)")
+    if pattern.search(content):
+        return pattern.sub(replacement.strip() + "\n", content).strip()
+    return f"{content.rstrip()}\n\n{replacement}"
 
 
 def planner_agent(state: TravelState) -> dict:
@@ -174,6 +235,7 @@ def planner_agent(state: TravelState) -> dict:
     availability_section = f"\n【数据可用性】\n{failure_notice}\n" if failure_notice else ""
 
     today_str = datetime.now().strftime("%Y年%m月%d日")
+    flexible_start_date = start_date == "日期灵活"
 
     # 构建出行方式说明
     travel_mode_section = ""
@@ -182,10 +244,23 @@ def planner_agent(state: TravelState) -> dict:
 
     budget_section = f"- 预算档位：{budget_level}" if budget_level else "- 预算档位：未指定"
     budget_requirement = (
-        f'最后给出"注意事项"与"预算安排"，预算安排只围绕用户已选择的「{budget_level}」档位展开，'
-        "不要再输出低/中/高三档对比。"
+        f'最后给出"注意事项"与"预算安排"。预算安排只围绕用户已选择的「{budget_level}」预算展开，'
+        "只给一版人均估算、费用构成和控费建议。"
         if budget_level
-        else '最后给出"注意事项"与"预算建议（低/中/高三档）"。'
+        else '最后给出"注意事项"与"预算安排"。用户未指定预算时，只给一版基础估算区间和可调项。'
+    )
+
+    date_output_rule = (
+        "每个 Day 标题下第一行必须标注「日期 + 天气参考」，格式为："
+        "「📅 日期：可任选出行日 | 🌤 天气：参考近期预报，出发前请再次确认」。"
+        "不要把“日期灵活”写成真实日期，也不要编造具体日期。"
+        if flexible_start_date
+        else (
+            "每个 Day 标题下第一行必须标注「日期 + 天气预报信息」 ，格式固定为："
+            "「📅 日期：XXXX 年 XX 月 XX 日 | 🌤 天气：晴转多云，15-23℃」"
+            "（日期格式统一为 “XXXX 年 XX 月 XX 日”，天气预报需包含天气状况、温度范围）。"
+            + (f"出发日期为 {start_date}，请从该日期开始依次推算每一天的具体日期。" if start_date else "")
+        )
     )
 
     prompt = f"""
@@ -195,7 +270,7 @@ def planner_agent(state: TravelState) -> dict:
 - 原始需求：{user_query or '未提供'}
 - 目的地：{city}
 - 天数：{days if days > 0 else '未指定'}
-- 出发日期：{start_date if start_date else '未指定'}
+- 出发日期：{'日期灵活，用户接受推荐日期或通用路线' if flexible_start_date else (start_date if start_date else '未指定')}
 - 偏好：{preference}
 {travel_mode_section}
 {budget_section}
@@ -210,10 +285,10 @@ def planner_agent(state: TravelState) -> dict:
    - 二级标题：## Day 1 · 真实当日主题概要
    - 三级标题：### 上午 / ### 下午 / ### 晚上 / ### 餐饮建议
    - 二级标题：## 注意事项
-   - 二级标题：## 预算安排 或 ## 预算建议
+   - 二级标题：## 预算安排
 2. 「行程概览」必须包含：主题、强度、适合人群、交通策略、预算档位（如有）。
 3. 按天拆分；每一天包含上午、下午、晚上。每个 Day 标题必须根据当天核心路线生成 8-16 字主题概要，例如「老城文化与夜游美食」「太湖风光与园林慢游」，严禁输出「当天主题」「主题待定」「综合游览」等占位词或泛词。
-4. 每个 Day 标题下第一行必须标注「日期 + 天气预报信息」 ，格式固定为：「📅 日期：XXXX 年 XX 月 XX 日 | 🌤 天气：晴转多云，15-23℃」（日期格式统一为 “XXXX 年 XX 月 XX 日”，天气预报需包含天气状况、温度范围）。{f"出发日期为 {start_date}，请从该日期开始依次推算每一天的具体日期。" if start_date else ""}
+4. {date_output_rule}
    第二行必须给出「本日概要：一句话说明主要动线、体验重点和行程节奏」，例如：「本日概要：上午集中游览老城文化点位，下午转向运河街区，晚上以本地餐饮和夜景收尾。」
 5. 每个上午/下午/晚上时间段必须用列表给出以下字段：地点/活动、推荐理由、建议停留、交通建议。
 6. **天气适配规则（重要）**：
@@ -221,9 +296,10 @@ def planner_agent(state: TravelState) -> dict:
    - 恶劣天气的晚上可以安排室内餐饮或演出。
    - 仅在天气良好时才推荐户外景点和活动。
 7. 每天补充 1-2 个餐饮建议。
-8. {budget_requirement}
-9. 不要编造资料中完全不存在的硬性事实；不确定信息用"建议/可考虑"表述。
-10. **交通建议要求**：
+8. {budget_requirement}严禁输出「低档 / 中档 / 高档」三档预算结构，严禁做档位对比，严禁出现“低档：”“中档：”“高档：”这类小标题。
+9. 如果已采集资料或知识库参考中包含小红书/社媒攻略资料，请在「行程概览」或「注意事项」中提炼“社媒口碑参考/避坑提醒”，但不要声称这是实时全网数据。
+10. 不要编造资料中完全不存在的硬性事实；不确定信息用"建议/可考虑"表述。
+11. **交通建议要求**：
    - 如果出行方式是自驾，请在交通建议中说明驾车路线和预计行驶时间。
 """
 
@@ -232,6 +308,7 @@ def planner_agent(state: TravelState) -> dict:
         if not content:
             response = llm.invoke(prompt)
             content = getattr(response, "content", None) or str(response)
+        content = _normalize_budget_section(str(content), budget_level, days)
         return {"messages": [AIMessage(content=content)]}
     except Exception as exc:
         return {

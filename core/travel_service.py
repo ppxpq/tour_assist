@@ -13,11 +13,13 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from agents.graph import build_travel_graph
 from core.db_manager import clear_database, ingest_documents, load_db
 from core.session_store import SessionStore
+from core.xhs_importer import XhsImportError, fetch_xhs_note_as_text
 from utils import config
 
 
 DEFAULT_MODEL = "glm-4.5-air"
 ROUTER_MODEL = "glm-4-flash"
+XHS_IMPORT_COOLDOWN_SECONDS = 60
 
 NODE_ORDER = ["router", "researcher", "planner", "ticket_agent"]
 NODE_TITLE = {
@@ -239,6 +241,27 @@ def _build_node_note(node: str, update: dict[str, Any]) -> str:
     return "-"
 
 
+def _public_state_update(node: str, update: dict[str, Any]) -> dict[str, Any]:
+    """Expose only JSON-safe planning fields to the frontend."""
+    if node == "router":
+        return {
+            "intent": str(update.get("intent") or ""),
+            "city": str(update.get("city") or ""),
+            "days": int(update.get("days") or 0),
+            "start_date": str(update.get("start_date") or ""),
+            "preference": str(update.get("preference") or ""),
+            "missing_fields": list(update.get("missing_fields") or []),
+            "user_query": str(update.get("user_query") or ""),
+        }
+    if node == "ticket_agent":
+        return {
+            "departure": str(update.get("departure") or ""),
+            "city": str(update.get("city") or ""),
+            "start_date": str(update.get("start_date") or ""),
+        }
+    return {}
+
+
 def _extension(filename: str) -> str:
     return Path(filename or "").suffix.lower()
 
@@ -438,73 +461,78 @@ class TravelService:
         self._lock = RLock()
         self._vector_lock = RLock()
         self.travel_graph = build_travel_graph()
-        self.vector_db = load_db()
+        self._vector_dbs: dict[str, Any] = {}
         self._session_store = SessionStore()
+        self._last_xhs_import_at = 0.0
         self._ensure_default_session()
 
-    def _ensure_default_session(self) -> None:
+    def _ensure_default_session(self, user_id: str = "local") -> None:
         with self._lock:
-            self._session_store.ensure_default_session()
+            self._session_store.ensure_default_session(user_id)
 
-    def create_session(self, title: str | None = None) -> dict[str, Any]:
+    def create_session(self, title: str | None = None, user_id: str = "local") -> dict[str, Any]:
         with self._lock:
-            return self._session_store.create_session(title)
+            return self._session_store.create_session(title, user_id=user_id)
 
-    def list_sessions(self) -> list[dict[str, Any]]:
+    def list_sessions(self, user_id: str = "local") -> list[dict[str, Any]]:
         with self._lock:
-            return self._session_store.list_sessions()
+            return self._session_store.list_sessions(user_id)
 
-    def get_session(self, session_id: str) -> dict[str, Any]:
+    def get_session(self, session_id: str, user_id: str = "local") -> dict[str, Any]:
         with self._lock:
-            return self._session_store.get_session(session_id)
+            return self._session_store.get_session(session_id, user_id)
 
-    def delete_session(self, session_id: str) -> dict[str, Any]:
+    def delete_session(self, session_id: str, user_id: str = "local") -> dict[str, Any]:
         with self._lock:
-            messages = self._session_store.get_session_messages(session_id)
+            messages = self._session_store.get_session_messages(session_id, user_id)
             self._cleanup_session_media(messages)
-            result = self._session_store.delete_session(session_id)
+            result = self._session_store.delete_session(session_id, user_id)
 
             if not result.get("current_session"):
-                return self._session_store.create_session("新会话")
+                return self._session_store.create_session("新会话", user_id=user_id)
             return result
 
-    def clear_session(self, session_id: str) -> dict[str, Any]:
+    def clear_session(self, session_id: str, user_id: str = "local") -> dict[str, Any]:
         with self._lock:
-            messages = self._session_store.get_session_messages(session_id)
+            messages = self._session_store.get_session_messages(session_id, user_id)
             self._cleanup_session_media(messages)
-            return self._session_store.clear_session_messages(session_id)
+            return self._session_store.clear_session_messages(session_id, user_id)
 
-    def _get_or_create_session_for_chat(self, session_id: str | None) -> tuple[str, list[dict[str, str]]]:
+    def _get_or_create_session_for_chat(
+        self,
+        session_id: str | None,
+        user_id: str = "local",
+    ) -> tuple[str, list[dict[str, str]]]:
         with self._lock:
-            if session_id and self._session_store.get_session_summary(session_id):
+            if session_id and self._session_store.get_session_summary(session_id, user_id):
                 resolved_session_id = session_id
-                self._session_store.set_current_session(session_id)
+                self._session_store.set_current_session(session_id, user_id)
             else:
-                session = self._session_store.create_session()
+                session = self._session_store.create_session(user_id=user_id)
                 resolved_session_id = str(session["id"])
 
-            return resolved_session_id, self._session_store.get_session_messages(resolved_session_id)
+            return resolved_session_id, self._session_store.get_session_messages(resolved_session_id, user_id)
 
-    def _append_message(self, session_id: str, role: str, content: str) -> None:
+    def _append_message(self, session_id: str, role: str, content: str, user_id: str = "local") -> None:
         with self._lock:
-            summary = self._session_store.get_session_summary(session_id)
+            summary = self._session_store.get_session_summary(session_id, user_id)
             if summary is None:
                 raise KeyError(session_id)
-            self._session_store.add_message(session_id, role, content)
+            self._session_store.add_message(session_id, role, content, user_id=user_id)
 
-    def _apply_session_title_candidate(self, session_id: str, candidate: str) -> None:
+    def _apply_session_title_candidate(self, session_id: str, candidate: str, user_id: str = "local") -> None:
         candidate = (candidate or "").strip()
         if not candidate:
             return
         with self._lock:
-            summary = self._session_store.get_session_summary(session_id)
+            summary = self._session_store.get_session_summary(session_id, user_id)
             if summary is None:
                 return
             current_title = str(summary.get("title") or "")
             if candidate == current_title:
                 return
             if _title_score(candidate) >= _title_score(current_title):
-                self._session_store.update_session(session_id, title=candidate)
+                self._session_store.update_session(session_id, title=candidate, user_id=user_id)
 
     def _maybe_update_session_title(
         self,
@@ -512,11 +540,12 @@ class TravelService:
         prompt: str,
         current_title: str,
         previous_message_count: int,
+        user_id: str = "local",
     ) -> None:
         candidate = _extract_trip_title(prompt, current_title)
         if not candidate and _is_low_quality_title(current_title):
             try:
-                messages = self._session_store.get_session_messages(session_id)
+                messages = self._session_store.get_session_messages(session_id, user_id)
                 recent_user_messages = [
                     msg.get("content", "")
                     for msg in messages[-8:]
@@ -532,13 +561,13 @@ class TravelService:
                 candidate = ""
 
         if candidate and candidate != current_title:
-            self._session_store.update_session(session_id, title=candidate)
+            self._session_store.update_session(session_id, title=candidate, user_id=user_id)
             return
 
         if previous_message_count == 0 and _is_low_quality_title(current_title):
             fallback = _short_title(prompt)
             if fallback and fallback != current_title:
-                self._session_store.update_session(session_id, title=fallback)
+                self._session_store.update_session(session_id, title=fallback, user_id=user_id)
 
     def _cleanup_session_media(self, messages: list[dict[str, str]]) -> None:
         seen: set[str] = set()
@@ -584,9 +613,29 @@ class TravelService:
             raise TravelServiceError("请输入文字或上传图片/语音。")
         return prompt
 
-    def _graph_input(self, prompt: str, chat_history: list[BaseMessage], model: str) -> dict[str, Any]:
+    @staticmethod
+    def _knowledge_user_key(user_id: str = "local") -> str:
+        normalized = re.sub(r"[^A-Za-z0-9_.-]", "_", user_id or "local").strip("._-")
+        return normalized[:80] or "local"
+
+    def _knowledge_persist_path(self, user_id: str = "local") -> str:
+        return str(Path(config.PERSIST_PATH) / "users" / self._knowledge_user_key(user_id))
+
+    def _get_vector_db_locked(self, user_id: str = "local"):
+        user_key = self._knowledge_user_key(user_id)
+        if user_key not in self._vector_dbs:
+            self._vector_dbs[user_key] = load_db(self._knowledge_persist_path(user_id))
+        return self._vector_dbs[user_key]
+
+    def _graph_input(
+        self,
+        prompt: str,
+        chat_history: list[BaseMessage],
+        model: str,
+        user_id: str = "local",
+    ) -> dict[str, Any]:
         with self._vector_lock:
-            vector_db = self.vector_db
+            vector_db = self._get_vector_db_locked(user_id)
         return {
             "messages": chat_history + [HumanMessage(content=prompt)],
             "router_model": ROUTER_MODEL,
@@ -599,6 +648,7 @@ class TravelService:
         prompt: str,
         chat_history: list[BaseMessage],
         model: str = DEFAULT_MODEL,
+        user_id: str = "local",
     ):
         runtime = _init_node_runtime()
         started_at = time.perf_counter()
@@ -615,7 +665,7 @@ class TravelService:
         }
 
         try:
-            graph_input = self._graph_input(prompt, chat_history, model)
+            graph_input = self._graph_input(prompt, chat_history, model, user_id)
             for event in self.travel_graph.stream(graph_input, stream_mode=["updates", "custom"]):
                 split_event = _split_graph_stream_event(event)
                 if split_event is None:
@@ -698,6 +748,7 @@ class TravelService:
                         "node": node_name,
                         "answer": maybe_text or None,
                         "title_candidate": title_candidate or None,
+                        "state_update": _public_state_update(node_name, update) or None,
                         "runtime": _runtime_snapshot(runtime),
                         "elapsed": round(elapsed, 3),
                     }
@@ -733,33 +784,37 @@ class TravelService:
         history: list[dict[str, str]] | None = None,
         uploads: list[UploadedFileData] | None = None,
         persist: bool = True,
+        user_id: str = "local",
+        display_message: str | None = None,
     ) -> dict[str, Any]:
         prompt = self.build_prompt(message, uploads)
+        stored_user_message = (display_message or "").strip() or prompt
         resolved_session_id: str | None = None
 
         if history is None:
             if persist:
-                resolved_session_id, previous_messages = self._get_or_create_session_for_chat(session_id)
+                resolved_session_id, previous_messages = self._get_or_create_session_for_chat(session_id, user_id)
             else:
                 previous_messages = []
         else:
             previous_messages = _sanitize_messages(history)
             if persist:
-                resolved_session_id, _ = self._get_or_create_session_for_chat(session_id)
+                resolved_session_id, _ = self._get_or_create_session_for_chat(session_id, user_id)
 
         chat_history = to_langchain_history(previous_messages)
         if persist and resolved_session_id:
-            self._append_message(resolved_session_id, "user", prompt)
+            self._append_message(resolved_session_id, "user", stored_user_message, user_id)
 
         node_events: list[dict[str, Any]] = []
         final_payload: dict[str, Any] | None = None
-        for event in self.iter_graph_events(prompt, chat_history, model or DEFAULT_MODEL):
+        for event in self.iter_graph_events(prompt, chat_history, model or DEFAULT_MODEL, user_id):
             if event["type"] == "node_update":
                 node_events.append(event)
                 if persist and resolved_session_id:
                     self._apply_session_title_candidate(
                         resolved_session_id,
                         str(event.get("title_candidate") or ""),
+                        user_id,
                     )
             elif event["type"] == "final":
                 final_payload = event
@@ -769,7 +824,7 @@ class TravelService:
 
         answer = str(final_payload.get("answer") or "")
         if persist and resolved_session_id:
-            self._append_message(resolved_session_id, "assistant", answer)
+            self._append_message(resolved_session_id, "assistant", answer, user_id)
 
         return {
             "session_id": resolved_session_id,
@@ -787,43 +842,62 @@ class TravelService:
         model: str = DEFAULT_MODEL,
         history: list[dict[str, str]] | None = None,
         persist: bool = True,
+        user_id: str = "local",
+        display_message: str | None = None,
     ):
         prompt = self.build_prompt(message)
+        stored_user_message = (display_message or "").strip() or prompt
         resolved_session_id: str | None = None
 
         if history is None:
             if persist:
-                resolved_session_id, previous_messages = self._get_or_create_session_for_chat(session_id)
+                resolved_session_id, previous_messages = self._get_or_create_session_for_chat(session_id, user_id)
             else:
                 previous_messages = []
         else:
             previous_messages = _sanitize_messages(history)
             if persist:
-                resolved_session_id, _ = self._get_or_create_session_for_chat(session_id)
+                resolved_session_id, _ = self._get_or_create_session_for_chat(session_id, user_id)
 
         chat_history = to_langchain_history(previous_messages)
         if persist and resolved_session_id:
-            self._append_message(resolved_session_id, "user", prompt)
+            self._append_message(resolved_session_id, "user", stored_user_message, user_id)
 
         final_answer = ""
         try:
-            for event in self.iter_graph_events(prompt, chat_history, model or DEFAULT_MODEL):
+            for event in self.iter_graph_events(prompt, chat_history, model or DEFAULT_MODEL, user_id):
                 event["session_id"] = resolved_session_id
                 if event["type"] == "node_update" and persist and resolved_session_id:
                     self._apply_session_title_candidate(
                         resolved_session_id,
                         str(event.get("title_candidate") or ""),
+                        user_id,
                     )
                 if event["type"] == "final":
                     final_answer = str(event.get("answer") or "")
                 yield event
         finally:
             if persist and resolved_session_id and final_answer:
-                self._append_message(resolved_session_id, "assistant", final_answer)
+                self._append_message(resolved_session_id, "assistant", final_answer, user_id)
 
-    def knowledge_status(self) -> dict[str, Any]:
+    def build_regenerate_prompt(self, supplement: str = "") -> tuple[str, str]:
+        supplement = (supplement or "").strip()
+        display_message = "按补充要求重新生成一版行程。" if supplement else "重新生成一版不同的行程方案。"
+        prompt_lines = [
+            "这是一次行程重新生成请求。请基于本会话历史中已经确认的出行需求、资料搜集结果和上一版行程，重新生成一版不同的旅行方案。",
+            "不要把这条内部指令当成用户新需求展示；不要重新要求用户补充已经在历史中确认过的信息。",
+            "如果用户此前明确表示日期不限、随便哪天出发、都可以或由系统安排，请将出发日期视为“日期灵活”，不要反复追问具体日期。",
+            "新版方案必须和上一版有可比较的差异：调整景点组合、动线顺序、餐饮选择、交通策略或节奏安排，而不是简单改写措辞。",
+        ]
+        if supplement:
+            prompt_lines.append(f"本次补充要求：{supplement}")
+        else:
+            prompt_lines.append("用户没有给出新的偏好，请主动换一个合理方向，例如更轻松、更美食导向、更人文或更少转场，但仍遵守既有约束。")
+        return "\n".join(prompt_lines), display_message
+
+    def knowledge_status(self, user_id: str = "local") -> dict[str, Any]:
         with self._vector_lock:
-            vector_db = self.vector_db
+            vector_db = self._get_vector_db_locked(user_id)
             if vector_db is None:
                 return {"loaded": False, "chunk_count": 0}
             try:
@@ -832,16 +906,65 @@ class TravelService:
                 chunk_count = 0
             return {"loaded": True, "chunk_count": chunk_count}
 
-    def ingest_knowledge(self, files: list[UploadedFileData], selected_model: str = DEFAULT_MODEL) -> dict[str, Any]:
+    def ingest_knowledge(
+        self,
+        files: list[UploadedFileData],
+        selected_model: str = DEFAULT_MODEL,
+        user_id: str = "local",
+    ) -> dict[str, Any]:
         if not files:
             raise TravelServiceError("没有检测到上传文件。")
         with self._vector_lock:
-            self.vector_db, result = ingest_documents(files, self.vector_db, selected_model)
-            status = self.knowledge_status()
+            user_key = self._knowledge_user_key(user_id)
+            vector_db = self._get_vector_db_locked(user_id)
+            self._vector_dbs[user_key], result = ingest_documents(
+                files,
+                vector_db,
+                selected_model,
+                self._knowledge_persist_path(user_id),
+            )
+            status = self.knowledge_status(user_id)
         return {**result, **status}
 
-    def clear_knowledge(self) -> dict[str, Any]:
+    def ingest_xhs_url(
+        self,
+        url: str,
+        selected_model: str = DEFAULT_MODEL,
+        user_id: str = "local",
+    ) -> dict[str, Any]:
+        with self._lock:
+            now = time.time()
+            wait_seconds = int(XHS_IMPORT_COOLDOWN_SECONDS - (now - self._last_xhs_import_at))
+            if wait_seconds > 0:
+                raise TravelServiceError(f"小红书导入已进入保护间隔，请 {wait_seconds} 秒后再试。")
+            self._last_xhs_import_at = now
+
+        try:
+            note = fetch_xhs_note_as_text(url)
+        except XhsImportError as exc:
+            raise TravelServiceError(str(exc)) from exc
+
+        note_id = note.get("note_id") or "note"
+        title = note.get("title") or "小红书笔记"
+        upload = UploadedFileData(
+            name=f"xhs_{note_id}.txt",
+            content=str(note.get("text") or "").encode("utf-8"),
+            content_type="text/plain",
+        )
+        result = self.ingest_knowledge([upload], selected_model=selected_model, user_id=user_id)
+        return {
+            **result,
+            "source": "xhs",
+            "note_id": note_id,
+            "title": title,
+            "url": note.get("source_url") or url,
+            "message": f"已导入小红书笔记：{title}。{result.get('message', '')}",
+        }
+
+    def clear_knowledge(self, user_id: str = "local") -> dict[str, Any]:
         with self._vector_lock:
-            success, message = clear_database(self.vector_db)
-            self.vector_db = None
-        return {"success": success, "message": message, **self.knowledge_status()}
+            user_key = self._knowledge_user_key(user_id)
+            vector_db = self._get_vector_db_locked(user_id)
+            success, message = clear_database(vector_db, self._knowledge_persist_path(user_id))
+            self._vector_dbs[user_key] = None
+        return {"success": success, "message": message, **self.knowledge_status(user_id)}

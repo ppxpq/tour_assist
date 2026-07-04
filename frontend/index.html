@@ -17,15 +17,6 @@
           </div>
         </header>
 
-        <section class="panel">
-          <label class="field-label" for="apiBaseInput">服务地址</label>
-          <div class="inline-control">
-            <input id="apiBaseInput" type="url" value="http://127.0.0.1:8000" spellcheck="false" />
-            <button id="saveApiBaseBtn" type="button">保存</button>
-          </div>
-          <div id="healthStatus" class="status-pill status-muted">未连接</div>
-        </section>
-
         <section class="panel panel-grow">
           <div class="section-title">
             <h2>旅行记录</h2>
@@ -41,11 +32,39 @@
             <h2>资料库</h2>
             <span id="kbBadge" class="mini-badge">未加载</span>
           </div>
-          <p id="kbStatusText" class="muted-text">上传攻略、笔记或表格，规划时会一起参考。</p>
+          <div class="kb-status-card">
+            <p id="kbStatusText">上传攻略、笔记或表格，规划时会一起参考。</p>
+            <span id="kbHintText">支持 PDF、DOCX、TXT、CSV 和小红书笔记链接。</span>
+          </div>
           <input id="kbFileInput" class="hidden-input" type="file" multiple accept=".pdf,.txt,.docx,.csv" />
-          <div class="button-row">
-            <button id="uploadKbBtn" class="secondary-button" type="button">上传文档</button>
-            <button id="clearKbBtn" class="ghost-button" type="button">清空</button>
+          <div class="kb-source-tabs" role="tablist" aria-label="资料库导入方式">
+            <button class="kb-source-tab active" type="button" data-kb-source="file" aria-selected="true">
+              文档
+            </button>
+            <button class="kb-source-tab" type="button" data-kb-source="xhs" aria-selected="false">
+              小红书链接
+            </button>
+          </div>
+          <div class="kb-action-card">
+            <div class="kb-source-panel active" data-kb-panel="file">
+              <div class="kb-action-copy">
+                <strong>上传资料文件</strong>
+                <span>官方攻略、游记、表格和自己整理的路线都可以放进来。</span>
+              </div>
+              <button id="uploadKbBtn" class="secondary-button kb-primary-action" type="button">选择文件</button>
+            </div>
+            <div class="kb-source-panel" data-kb-panel="xhs">
+              <label class="kb-url-field" for="xhsUrlInput">
+                <span>小红书笔记链接</span>
+                <input id="xhsUrlInput" type="url" placeholder="粘贴带 xsec_token 的笔记链接" autocomplete="off" />
+              </label>
+              <button id="importXhsBtn" class="secondary-button kb-primary-action" type="button">导入链接</button>
+            </div>
+          </div>
+          <p id="kbNoticeText" class="kb-notice" hidden></p>
+          <div class="kb-footer-actions">
+            <span>资料会进入你的个人资料库</span>
+            <button id="clearKbBtnGlobal" class="text-button" type="button">清空资料库</button>
           </div>
         </section>
       </aside>
@@ -62,6 +81,12 @@
           <div class="model-control">
             <label for="modelSelect">规划模型</label>
             <select id="modelSelect"></select>
+          </div>
+          <div class="account-control">
+            <div id="healthStatus" class="status-pill status-muted">未连接</div>
+            <span id="accountName" tabindex="0">未登录</span>
+            <div id="accountPopover" class="account-popover" role="status"></div>
+            <button id="logoutBtn" class="ghost-button compact-button" type="button" hidden>退出</button>
           </div>
         </header>
 
@@ -238,20 +263,58 @@
               <div id="tripSummaryPanel" class="trip-summary-panel"></div>
             </div>
             <div class="quick-prompts">
-              <h3>灵感模板</h3>
-              <button type="button" data-prompt="我想去无锡玩 3 天，5 月 20 日出发，喜欢历史、美食和摄影，请帮我规划行程。">
-                做一份 3 天游玩路线
-              </button>
-              <button type="button" data-prompt="查询明天从无锡到南京的高铁票。">
-                查询车票
-              </button>
-              <button type="button" data-prompt="根据知识库内容，推荐适合亲子游的目的地。">
-                知识库问答
-              </button>
+              <div class="quick-prompts-head">
+                <h3>灵感模板</h3>
+                <button id="shufflePromptBtn" class="ghost-button compact-button" type="button">换一换</button>
+              </div>
+              <div id="quickPromptList" class="quick-prompt-list" aria-live="polite"></div>
             </div>
           </aside>
         </section>
       </main>
+    </div>
+
+    <div id="authModal" class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <form id="authForm" class="auth-card">
+        <div class="auth-card-head">
+          <div>
+            <h2 id="authTitle">登录账号</h2>
+            <p id="authSubtitle">登录后保存你的旅行记录和规划资料。</p>
+          </div>
+          <div class="brand-mark small">行</div>
+        </div>
+        <label class="auth-field" for="authUsername">
+          <span>用户名</span>
+          <input
+            id="authUsername"
+            type="text"
+            autocomplete="username"
+            minlength="3"
+            maxlength="32"
+            pattern="[A-Za-z0-9_]{3,32}"
+            title="3-32 位，仅支持字母、数字和下划线"
+            required
+          />
+          <small>3-32 位，仅支持字母、数字和下划线。</small>
+        </label>
+        <label class="auth-field" for="authPassword">
+          <span>密码</span>
+          <input
+            id="authPassword"
+            type="password"
+            autocomplete="current-password"
+            minlength="8"
+            maxlength="64"
+            pattern="(?=.*[A-Za-z])(?=.*\d)\S{8,64}"
+            title="8-64 位，需要同时包含字母和数字，不能有空格"
+            required
+          />
+          <small>8-64 位，需同时包含字母和数字，不能有空格。</small>
+        </label>
+        <p id="authStatusText" class="auth-status" hidden></p>
+        <button id="authSubmitBtn" class="send-button" type="submit">登录</button>
+        <button id="authToggleModeBtn" class="text-button auth-switch" type="button">没有账号？注册一个</button>
+      </form>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

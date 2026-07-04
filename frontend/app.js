@@ -1,12 +1,17 @@
 (function () {
   "use strict";
 
-  const API_BASE_KEY = "travelAssistant.apiBase";
+  const ACCESS_TOKEN_KEY = "travelAssistant.accessToken";
+  const REFRESH_TOKEN_KEY = "travelAssistant.refreshToken";
+  const AUTH_USER_KEY = "travelAssistant.authUser";
   const RUNTIME_WIDTH_KEY = "travelAssistant.runtimeWidth";
   const ACTIVE_SESSION_KEY = "travelAssistant.activeSessionId";
   const TRIP_BUILDER_OPEN_KEY = "travelAssistant.tripBuilderOpen";
   const DEFAULT_API_BASE = "http://127.0.0.1:8000";
+  const API_BASE_CANDIDATES = buildApiBaseCandidates();
   const MULTI_TRIP_FIELDS = new Set(["travelers", "preferences", "localMobility"]);
+  const QUICK_PROMPT_PAGE_SIZE = 3;
+  const XHS_IMPORT_COOLDOWN_MS = 60 * 1000;
 
   const STEPS = [
     { key: "router", title: "理解需求" },
@@ -31,6 +36,66 @@
     other: "已收到需求",
   };
 
+  const QUICK_PROMPTS = [
+    {
+      title: "周末慢游",
+      meta: "2 天 · 休闲 · 少走路",
+      prompt: "我想周末去无锡玩 2 天，偏好休闲、美食和少走路，请帮我安排一条节奏舒服的路线。",
+    },
+    {
+      title: "亲子轻松线",
+      meta: "3 天 · 亲子 · 安全便利",
+      prompt: "我想带孩子去无锡玩 3 天，偏好亲子、自然和美食，希望路线安全、转场少、餐饮方便。",
+    },
+    {
+      title: "老人友好线",
+      meta: "3 天 · 老人 · 无障碍优先",
+      prompt: "我想带老人去无锡玩 3 天，预算舒适，要求少走路、休息点多、无障碍优先，请帮我规划。",
+    },
+    {
+      title: "摄影夜游线",
+      meta: "2 天 · 摄影 · 夜游",
+      prompt: "我想去无锡玩 2 天，喜欢摄影、夜游和小众街区，请安排适合拍照且晚上不无聊的路线。",
+    },
+    {
+      title: "省钱学生线",
+      meta: "2 天 · 经济 · 公共交通",
+      prompt: "我想去无锡玩 2 天，预算经济，偏好美食和人文，尽量用公共交通和免费或低价景点。",
+    },
+    {
+      title: "品质度假线",
+      meta: "4 天 · 品质 · 慢节奏",
+      prompt: "我想去无锡玩 4 天，预算品质，偏好自然、休闲和好吃的餐厅，希望少排队、体验更舒服。",
+    },
+    {
+      title: "临时改行程",
+      meta: "追问 · 调整 · 继续规划",
+      prompt: "刚才的行程我想调整一下：把天数改成 4 天，减少赶路，多安排一些适合休息和吃饭的地方。",
+    },
+    {
+      title: "车票查询",
+      meta: "查询 · 到达方式 · 时间衔接",
+      prompt: "帮我查询明天从南京到无锡的高铁票，并结合到达时间建议第一天怎么安排比较顺。",
+    },
+    {
+      title: "资料库推荐",
+      meta: "知识库 · 对比 · 总结",
+      prompt: "请根据我上传到知识库的资料，推荐适合亲子和老人一起出行的目的地，并说明理由。",
+    },
+  ];
+
+  function buildApiBaseCandidates() {
+    const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+    const hostname = window.location.hostname || "127.0.0.1";
+    const configured = window.TRAVEL_ASSIST_API_BASE || "";
+    return [...new Set([
+      configured,
+      `${protocol}//${hostname}:8000`,
+      `${protocol}//${hostname}:8001`,
+      DEFAULT_API_BASE,
+    ].filter(Boolean).map(normalizeApiBase))];
+  }
+
   const state = {
     apiBase: DEFAULT_API_BASE,
     activeSessionId: null,
@@ -40,20 +105,38 @@
     tripDraft: createEmptyTripDraft(),
     tripDraftDirty: false,
     latestItineraryMarkdown: "",
+    latestRouteRequest: "",
+    quickPromptCursor: 0,
+    xhsCooldownUntil: 0,
+    accessToken: "",
+    refreshToken: "",
+    authUser: null,
+    authMode: "login",
+    isRefreshingToken: false,
     isBusy: false,
     shouldAutoScroll: true,
     toastTimer: null,
   };
 
   const els = {
-    apiBaseInput: document.getElementById("apiBaseInput"),
-    saveApiBaseBtn: document.getElementById("saveApiBaseBtn"),
     healthStatus: document.getElementById("healthStatus"),
     sessionList: document.getElementById("sessionList"),
     newSessionBtn: document.getElementById("newSessionBtn"),
     activeSessionTitle: document.getElementById("activeSessionTitle"),
     activeSessionMeta: document.getElementById("activeSessionMeta"),
     modelSelect: document.getElementById("modelSelect"),
+    accountName: document.getElementById("accountName"),
+    accountPopover: document.getElementById("accountPopover"),
+    logoutBtn: document.getElementById("logoutBtn"),
+    authModal: document.getElementById("authModal"),
+    authForm: document.getElementById("authForm"),
+    authTitle: document.getElementById("authTitle"),
+    authSubtitle: document.getElementById("authSubtitle"),
+    authUsername: document.getElementById("authUsername"),
+    authPassword: document.getElementById("authPassword"),
+    authSubmitBtn: document.getElementById("authSubmitBtn"),
+    authToggleModeBtn: document.getElementById("authToggleModeBtn"),
+    authStatusText: document.getElementById("authStatusText"),
     messageList: document.getElementById("messageList"),
     chatForm: document.getElementById("chatForm"),
     messageInput: document.getElementById("messageInput"),
@@ -74,13 +157,21 @@
     runtimeTabs: Array.from(document.querySelectorAll("[data-runtime-tab]")),
     runtimePanels: Array.from(document.querySelectorAll("[data-runtime-panel]")),
     tripSummaryPanel: document.getElementById("tripSummaryPanel"),
+    quickPromptList: document.getElementById("quickPromptList"),
+    shufflePromptBtn: document.getElementById("shufflePromptBtn"),
     elapsedText: document.getElementById("elapsedText"),
     clearSessionBtn: document.getElementById("clearSessionBtn"),
     kbBadge: document.getElementById("kbBadge"),
     kbStatusText: document.getElementById("kbStatusText"),
+    kbHintText: document.getElementById("kbHintText"),
+    kbNoticeText: document.getElementById("kbNoticeText"),
     kbFileInput: document.getElementById("kbFileInput"),
+    kbSourceTabs: Array.from(document.querySelectorAll("[data-kb-source]")),
+    kbSourcePanels: Array.from(document.querySelectorAll("[data-kb-panel]")),
+    xhsUrlInput: document.getElementById("xhsUrlInput"),
     uploadKbBtn: document.getElementById("uploadKbBtn"),
-    clearKbBtn: document.getElementById("clearKbBtn"),
+    importXhsBtn: document.getElementById("importXhsBtn"),
+    clearKbBtnGlobal: document.getElementById("clearKbBtnGlobal"),
     toast: document.getElementById("toast"),
     sidebar: document.querySelector(".sidebar"),
     sidebarToggleBtn: document.getElementById("sidebarToggleBtn"),
@@ -105,31 +196,38 @@
   }
 
   async function init() {
-    state.apiBase = normalizeApiBase(localStorage.getItem(API_BASE_KEY) || DEFAULT_API_BASE);
-    els.apiBaseInput.value = state.apiBase;
+    state.apiBase = DEFAULT_API_BASE;
+    restoreAuthState();
 
     bindEvents();
     restoreRuntimeWidth();
     restoreTripBuilderState();
     renderTripSummary();
     renderTripSummaryPanel();
+    renderQuickPrompts();
     renderRuntime();
     renderSelectedFiles();
+    renderAuthState();
     setBusy(false);
 
-    await Promise.allSettled([loadModels(), loadSessions(), refreshHealth(), refreshKnowledgeStatus()]);
+    await detectApiBase();
+    await Promise.allSettled([loadModels(), refreshHealth()]);
+    if (state.accessToken || state.refreshToken) {
+      await verifyAuthSession();
+    } else {
+      showAuthModal("login");
+      renderMessages([]);
+      updateSessionHeader();
+    }
   }
 
   function bindEvents() {
-    els.saveApiBaseBtn.addEventListener("click", async () => {
-      state.apiBase = normalizeApiBase(els.apiBaseInput.value || DEFAULT_API_BASE);
-      els.apiBaseInput.value = state.apiBase;
-      localStorage.setItem(API_BASE_KEY, state.apiBase);
-      showToast("后端地址已保存");
-      await Promise.allSettled([loadModels(), loadSessions(), refreshHealth(), refreshKnowledgeStatus()]);
-    });
-
     els.newSessionBtn.addEventListener("click", createSession);
+    els.authForm.addEventListener("submit", handleAuthSubmit);
+    els.authToggleModeBtn.addEventListener("click", () => {
+      showAuthModal(state.authMode === "login" ? "register" : "login");
+    });
+    els.logoutBtn.addEventListener("click", logout);
     els.clearSessionBtn.addEventListener("click", clearActiveSession);
     els.attachBtn.addEventListener("click", () => els.chatFileInput.click());
     els.chatFileInput.addEventListener("change", handleChatFilesSelected);
@@ -188,15 +286,26 @@
 
     els.uploadKbBtn.addEventListener("click", () => els.kbFileInput.click());
     els.kbFileInput.addEventListener("change", uploadKnowledgeFiles);
-    els.clearKbBtn.addEventListener("click", clearKnowledgeBase);
-
-    document.querySelectorAll("[data-prompt]").forEach((button) => {
-      button.addEventListener("click", () => {
-        els.messageInput.value = button.getAttribute("data-prompt") || "";
-        resizeTextarea(els.messageInput);
-        els.messageInput.focus();
-      });
+    els.importXhsBtn.addEventListener("click", importXhsUrl);
+    els.clearKbBtnGlobal.addEventListener("click", clearKnowledgeBase);
+    els.kbSourceTabs.forEach((button) => {
+      button.addEventListener("click", () => setKnowledgeSource(button.getAttribute("data-kb-source") || "file"));
     });
+    els.xhsUrlInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        importXhsUrl();
+      }
+    });
+
+    els.quickPromptList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-prompt]");
+      if (!button) {
+        return;
+      }
+      fillPrompt(button.getAttribute("data-prompt") || "");
+    });
+    els.shufflePromptBtn.addEventListener("click", shuffleQuickPrompts);
 
     els.sidebarToggleBtn.addEventListener("click", () => {
       els.sidebar.classList.toggle("open");
@@ -218,6 +327,51 @@
 
   function normalizeApiBase(value) {
     return String(value || DEFAULT_API_BASE).trim().replace(/\/+$/, "") || DEFAULT_API_BASE;
+  }
+
+  function setKnowledgeSource(source) {
+    setKnowledgeNotice("");
+    els.kbSourceTabs.forEach((button) => {
+      const isActive = button.getAttribute("data-kb-source") === source;
+      button.classList.toggle("active", isActive);
+      button.setAttribute("aria-selected", String(isActive));
+    });
+    els.kbSourcePanels.forEach((panel) => {
+      panel.classList.toggle("active", panel.getAttribute("data-kb-panel") === source);
+    });
+  }
+
+  function fillPrompt(prompt) {
+    els.messageInput.value = prompt;
+    resizeTextarea(els.messageInput);
+    els.messageInput.focus();
+  }
+
+  function renderQuickPrompts() {
+    if (!els.quickPromptList) {
+      return;
+    }
+    const prompts = getVisibleQuickPrompts();
+    els.quickPromptList.innerHTML = prompts.map((item) => `
+      <button class="quick-prompt-card" type="button" data-prompt="${escapeHtml(item.prompt)}">
+        <span>${escapeHtml(item.meta)}</span>
+        <strong>${escapeHtml(item.title)}</strong>
+        <small>${escapeHtml(item.prompt)}</small>
+      </button>
+    `).join("");
+  }
+
+  function getVisibleQuickPrompts() {
+    const visible = [];
+    for (let offset = 0; offset < QUICK_PROMPT_PAGE_SIZE; offset += 1) {
+      visible.push(QUICK_PROMPTS[(state.quickPromptCursor + offset) % QUICK_PROMPTS.length]);
+    }
+    return visible;
+  }
+
+  function shuffleQuickPrompts() {
+    state.quickPromptCursor = (state.quickPromptCursor + QUICK_PROMPT_PAGE_SIZE) % QUICK_PROMPTS.length;
+    renderQuickPrompts();
   }
 
   function toggleTripTag(button) {
@@ -309,9 +463,10 @@
     }
 
     const draftItems = getTripDraftItems();
-    const latestUserMessage = getLatestUserMessage();
+    const latestRouteRequest = getLatestRouteRequest();
     const latestTitle = getItineraryTitle(state.latestItineraryMarkdown);
     const hasDraft = draftItems.some((item) => item.value !== "未指定");
+    const canRegenerate = Boolean(state.activeSessionId || latestRouteRequest || latestTitle);
 
     const draftHtml = hasDraft
       ? draftItems.map((item) => `
@@ -322,8 +477,8 @@
         `).join("")
       : '<p class="summary-empty">还没有选择标签。展开左侧“快速描述需求”，可以先把目的地、天数、预算和交通偏好搭起来。</p>';
 
-    const requestHtml = latestUserMessage
-      ? `<div class="summary-request">${renderMarkdown(latestUserMessage)}</div>`
+    const requestHtml = latestRouteRequest
+      ? `<div class="summary-request">${renderMarkdown(latestRouteRequest)}</div>`
       : '<p class="summary-empty">发送需求后，这里会保留最近一次规划依据。</p>';
 
     const itineraryHtml = latestTitle
@@ -334,10 +489,21 @@
           <div class="summary-actions">
             <button type="button" data-summary-action="copy">复制</button>
             <button type="button" data-summary-action="export">导出 MD</button>
+            <button type="button" data-summary-action="regenerate">重新生成</button>
           </div>
         </div>
       `
-      : '<p class="summary-empty">生成行程后，可在这里快速复制或导出 Markdown。</p>';
+      : `
+        <div class="summary-latest">
+          <span>结果操作</span>
+          <strong>${canRegenerate ? "可基于当前上下文再生成一版" : "生成行程后，可在这里快速复制或导出 Markdown。"}</strong>
+          ${canRegenerate ? `
+            <div class="summary-actions">
+              <button type="button" data-summary-action="regenerate">重新生成</button>
+            </div>
+          ` : ""}
+        </div>
+      `;
 
     els.tripSummaryPanel.innerHTML = `
       <section class="summary-card">
@@ -360,6 +526,11 @@
     els.tripSummaryPanel.querySelector("[data-summary-action='export']")?.addEventListener("click", () => {
       exportMarkdown(state.latestItineraryMarkdown);
     });
+    els.tripSummaryPanel.querySelector("[data-summary-action='regenerate']")?.addEventListener("click", () => {
+      regenerateItinerary().catch((error) => {
+        showToast(`重新生成失败：${error.message}`);
+      });
+    });
   }
 
   function getTripDraftItems() {
@@ -377,14 +548,76 @@
     ];
   }
 
-  function getLatestUserMessage() {
+  function getLatestRouteRequest() {
+    if (state.latestRouteRequest) {
+      return state.latestRouteRequest;
+    }
     const messages = state.activeSession?.messages || [];
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index]?.role === "user" && messages[index]?.content) {
-        return messages[index].content;
+      const content = messages[index]?.content || "";
+      if (messages[index]?.role === "user" && isLikelyPlanningRequest(content)) {
+        return summarizeRequestText(content);
       }
     }
     return "";
+  }
+
+  function isLikelyPlanningRequest(text) {
+    const compact = String(text || "").replace(/\s+/g, "");
+    return /旅行|旅游|出行|行程|路线|攻略|我想去|目的地|玩\d{1,2}天|偏好|预算|同行人/.test(compact);
+  }
+
+  function isRegenerateRequest(text) {
+    return /^请基于本会话已经确认的出行需求和上下文，重新生成一版不同的行程方案。/.test(String(text || "").trim());
+  }
+
+  function summarizeRequestText(text) {
+    const lines = String(text || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
+    return lines.slice(0, 6).join("\n");
+  }
+
+  function buildRouteRequestSummary(update = {}) {
+    const intent = String(update.intent || "");
+    const city = String(update.city || "").trim();
+    const days = Number(update.days || 0);
+    const startDate = String(update.start_date || "").trim();
+    const preference = String(update.preference || "").trim();
+    const userQuery = String(update.user_query || "").trim();
+
+    if (!["need_plan", "need_more_info"].includes(intent)) {
+      return state.latestRouteRequest || summarizeRequestText(userQuery);
+    }
+
+    const parts = [];
+    parts.push(city ? `${city}${days > 0 ? ` ${days}日` : ""}` : days > 0 ? `${days}日行程` : "旅行规划");
+    if (startDate === "日期灵活") {
+      parts.push("日期不定");
+    } else if (startDate) {
+      parts.push(`${startDate}出发`);
+    }
+    if (preference) {
+      parts.push(preference.replace(/\+/g, " / "));
+    }
+
+    const missing = Array.isArray(update.missing_fields) ? update.missing_fields : [];
+    if (missing.length) {
+      parts.push(`待补充：${missing.map(formatMissingField).join("、")}`);
+    }
+
+    const summary = parts.filter(Boolean).join(" · ");
+    if (summary && summary !== "旅行规划") {
+      return summary;
+    }
+    return summarizeRequestText(userQuery);
+  }
+
+  function formatMissingField(field) {
+    return {
+      city: "目的地",
+      days: "天数",
+      start_date: "出发日期",
+      preference: "偏好",
+    }[field] || field;
   }
 
   function clearTripDraft() {
@@ -546,18 +779,353 @@
     return `${state.apiBase}${path}`;
   }
 
-  async function fetchJson(path, options = {}) {
+  async function detectApiBase() {
+    setHealth("checking", "正在连接服务");
+    const fallbackCandidates = [];
+
+    for (const candidate of API_BASE_CANDIDATES) {
+      try {
+        const response = await fetch(`${candidate}/api/auth/me`, {
+          headers: { Accept: "application/json" },
+        });
+        if (response.status === 401) {
+          state.apiBase = candidate;
+          return candidate;
+        }
+        fallbackCandidates.push(candidate);
+      } catch (error) {
+        // Try the next local candidate.
+      }
+    }
+
+    for (const candidate of fallbackCandidates.length ? fallbackCandidates : API_BASE_CANDIDATES) {
+      try {
+        const response = await fetch(`${candidate}/api/health`, {
+          headers: { Accept: "application/json" },
+        });
+        if (response.ok) {
+          state.apiBase = candidate;
+          return candidate;
+        }
+      } catch (error) {
+        // Try the next local candidate.
+      }
+    }
+
+    state.apiBase = DEFAULT_API_BASE;
+    setHealth("error", "未找到后端服务");
+    return state.apiBase;
+  }
+
+  function restoreAuthState() {
+    state.accessToken = localStorage.getItem(ACCESS_TOKEN_KEY) || "";
+    state.refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY) || "";
+    try {
+      state.authUser = JSON.parse(localStorage.getItem(AUTH_USER_KEY) || "null");
+    } catch (error) {
+      state.authUser = null;
+    }
+  }
+
+  function saveAuthState(payload) {
+    state.accessToken = payload.access_token || "";
+    state.refreshToken = payload.refresh_token || state.refreshToken || "";
+    state.authUser = payload.user || state.authUser;
+    if (state.accessToken) {
+      localStorage.setItem(ACCESS_TOKEN_KEY, state.accessToken);
+    }
+    if (state.refreshToken) {
+      localStorage.setItem(REFRESH_TOKEN_KEY, state.refreshToken);
+    }
+    if (state.authUser) {
+      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(state.authUser));
+    }
+    renderAuthState();
+  }
+
+  function clearAuthState() {
+    state.accessToken = "";
+    state.refreshToken = "";
+    state.authUser = null;
+    localStorage.removeItem(ACCESS_TOKEN_KEY);
+    localStorage.removeItem(REFRESH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_USER_KEY);
+    localStorage.removeItem(ACTIVE_SESSION_KEY);
+    state.activeSessionId = null;
+    state.activeSession = null;
+    state.sessions = [];
+    renderAuthState();
+    renderSessions();
+    renderMessages([]);
+    updateSessionHeader();
+  }
+
+  function renderAuthState() {
+    const username = state.authUser?.username || "";
+    els.accountName.textContent = username ? `账号：${username}` : "未登录";
+    els.logoutBtn.hidden = !username;
+    renderAccountPopover();
+  }
+
+  function renderAccountPopover() {
+    if (!els.accountPopover) {
+      return;
+    }
+
+    if (!state.authUser) {
+      els.accountPopover.innerHTML = `
+        <strong>未登录</strong>
+        <p>登录后可以保存旅行记录和资料库状态。</p>
+      `;
+      return;
+    }
+
+    const stats = getPlanningStats();
+    els.accountPopover.innerHTML = `
+      <div class="account-popover-head">
+        <strong>${escapeHtml(state.authUser.username || "旅行用户")}</strong>
+        <span>${escapeHtml(stats.lastPlanText)}</span>
+      </div>
+      <div class="account-metrics">
+        <div><strong>${stats.totalPlans}</strong><span>旅行记录</span></div>
+        <div><strong>${stats.activeDays}</strong><span>活跃日期</span></div>
+      </div>
+      <div class="account-calendar">
+        <div class="account-calendar-title">${escapeHtml(stats.monthTitle)}</div>
+        <div class="account-calendar-grid">
+          ${stats.weekdays.map((day) => `<span class="calendar-weekday">${day}</span>`).join("")}
+          ${stats.cells.map((cell) => `
+            <span class="${cell.className}" title="${escapeHtml(cell.title)}">${cell.label}</span>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function getPlanningStats() {
+    const sessions = Array.isArray(state.sessions) ? state.sessions : [];
+    const plannedSessions = sessions.filter((session) => Number(session.message_count || 0) > 0);
+    const dates = plannedSessions
+      .map((session) => parseLocalDate(session.updated_at))
+      .filter(Boolean)
+      .sort((a, b) => b.getTime() - a.getTime());
+    const lastDate = dates[0] || null;
+    const lastPlanText = lastDate ? formatDaysSince(lastDate) : "还没有开始规划";
+    const calendar = buildActivityCalendar(dates);
+
+    return {
+      totalPlans: plannedSessions.length,
+      activeDays: new Set(dates.map(dateKey)).size,
+      lastPlanText,
+      ...calendar,
+    };
+  }
+
+  function buildActivityCalendar(dates) {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = today.getMonth();
+    const activeKeys = new Set(
+      dates
+        .filter((date) => date.getFullYear() === year && date.getMonth() === month)
+        .map(dateKey),
+    );
+    const firstDay = new Date(year, month, 1);
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const offset = (firstDay.getDay() + 6) % 7;
+    const cells = [];
+
+    for (let index = 0; index < offset; index += 1) {
+      cells.push({ label: "", className: "calendar-day is-empty", title: "" });
+    }
+
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const current = new Date(year, month, day);
+      const key = dateKey(current);
+      const isActive = activeKeys.has(key);
+      const isToday = key === dateKey(today);
+      cells.push({
+        label: String(day),
+        className: [
+          "calendar-day",
+          isActive ? "is-active" : "",
+          isToday ? "is-today" : "",
+        ].filter(Boolean).join(" "),
+        title: isActive ? `${key} 有旅行记录` : key,
+      });
+    }
+
+    return {
+      monthTitle: `${year} 年 ${month + 1} 月`,
+      weekdays: ["一", "二", "三", "四", "五", "六", "日"],
+      cells,
+    };
+  }
+
+  function showAuthModal(mode = state.authMode || "login", message = "") {
+    state.authMode = mode;
+    const isRegister = mode === "register";
+    els.authTitle.textContent = isRegister ? "注册账号" : "登录账号";
+    els.authSubtitle.textContent = isRegister ? "创建账号后，会自动建立你的旅行记录空间。" : "登录后保存你的旅行记录和规划资料。";
+    els.authSubmitBtn.textContent = isRegister ? "注册并登录" : "登录";
+    els.authToggleModeBtn.textContent = isRegister ? "已有账号？去登录" : "没有账号？注册一个";
+    setAuthStatus(message, message ? "error" : "");
+    els.authModal.classList.add("open");
+    window.setTimeout(() => els.authUsername.focus(), 0);
+  }
+
+  function hideAuthModal() {
+    els.authModal.classList.remove("open");
+    setAuthStatus("");
+  }
+
+  function setAuthStatus(message, type = "") {
+    const text = String(message || "").trim();
+    els.authStatusText.hidden = !text;
+    els.authStatusText.textContent = text;
+    els.authStatusText.classList.toggle("is-error", type === "error");
+    els.authStatusText.classList.toggle("is-success", type === "success");
+  }
+
+  function isPublicAuthPath(path) {
+    return ["/api/auth/login", "/api/auth/register", "/api/auth/refresh"].includes(String(path || ""));
+  }
+
+  function withAuthHeaders(path, options = {}) {
     const headers = new Headers(options.headers || {});
     const isForm = options.body instanceof FormData;
     if (!isForm && options.body !== undefined && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
+    if (state.accessToken && !headers.has("Authorization") && !isPublicAuthPath(path)) {
+      headers.set("Authorization", `Bearer ${state.accessToken}`);
+    }
+    return { ...options, headers };
+  }
 
-    const response = await fetch(apiUrl(path), { ...options, headers });
+  async function fetchWithAuth(path, options = {}, retry = true) {
+    const response = await fetch(apiUrl(path), withAuthHeaders(path, options));
+    if (response.status === 401 && retry && !isPublicAuthPath(path) && state.refreshToken) {
+      const refreshed = await refreshAccessToken();
+      if (refreshed) {
+        return fetchWithAuth(path, options, false);
+      }
+    }
+    return response;
+  }
+
+  async function fetchJson(path, options = {}) {
+    const response = await fetchWithAuth(path, options);
     if (!response.ok) {
       throw new Error(await readErrorMessage(response));
     }
     return response.json();
+  }
+
+  async function refreshAccessToken() {
+    if (!state.refreshToken || state.isRefreshingToken) {
+      return false;
+    }
+    state.isRefreshingToken = true;
+    try {
+      const response = await fetch(apiUrl("/api/auth/refresh"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: state.refreshToken }),
+      });
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response));
+      }
+      saveAuthState(await response.json());
+      return true;
+    } catch (error) {
+      clearAuthState();
+      showAuthModal("login", error.message || "登录状态已过期，请重新登录。");
+      return false;
+    } finally {
+      state.isRefreshingToken = false;
+    }
+  }
+
+  async function verifyAuthSession() {
+    try {
+      const payload = await fetchJson("/api/auth/me");
+      state.authUser = payload.user || state.authUser;
+      if (state.authUser) {
+        localStorage.setItem(AUTH_USER_KEY, JSON.stringify(state.authUser));
+      }
+      renderAuthState();
+      hideAuthModal();
+      await Promise.allSettled([loadSessions(), refreshKnowledgeStatus()]);
+    } catch (error) {
+      clearAuthState();
+      showAuthModal("login", error.message);
+    }
+  }
+
+  async function handleAuthSubmit(event) {
+    event.preventDefault();
+    const username = els.authUsername.value.trim();
+    const password = els.authPassword.value;
+    const authValidationError = validateAuthFields(username, password);
+    if (authValidationError) {
+      setAuthStatus(authValidationError, "error");
+      return;
+    }
+
+    els.authSubmitBtn.disabled = true;
+    els.authSubmitBtn.textContent = state.authMode === "register" ? "注册中..." : "登录中...";
+    setAuthStatus("");
+
+    try {
+      const payload = await fetchJson(`/api/auth/${state.authMode}`, {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      });
+      saveAuthState(payload);
+      els.authPassword.value = "";
+      hideAuthModal();
+      setAuthStatus("登录成功。", "success");
+      await Promise.allSettled([loadSessions(null, { resetRuntime: true }), refreshKnowledgeStatus()]);
+      showToast(state.authMode === "register" ? "注册成功，已登录" : "登录成功");
+    } catch (error) {
+      setAuthStatus(error.message, "error");
+    } finally {
+      els.authSubmitBtn.disabled = false;
+      els.authSubmitBtn.textContent = state.authMode === "register" ? "注册并登录" : "登录";
+    }
+  }
+
+  function validateAuthFields(username, password) {
+    if (!/^[A-Za-z0-9_]{3,32}$/.test(username)) {
+      return "用户名需为 3-32 位，仅支持字母、数字和下划线。";
+    }
+    if (!/^(\S){8,64}$/.test(password)) {
+      return "密码长度需要在 8 到 64 位之间，且不能包含空格。";
+    }
+    if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+      return "密码需要同时包含字母和数字。";
+    }
+    return "";
+  }
+
+  async function logout() {
+    const refreshToken = state.refreshToken;
+    try {
+      if (refreshToken) {
+        await fetchJson("/api/auth/logout", {
+          method: "POST",
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+      }
+    } catch (error) {
+      // 本地退出优先，服务端撤销失败时也不保留本地登录态。
+    } finally {
+      clearAuthState();
+      setKnowledgeNotice("");
+      showAuthModal("login");
+      showToast("已退出登录");
+    }
   }
 
   async function readErrorMessage(response) {
@@ -575,8 +1143,8 @@
     setHealth("checking", "正在连接");
     try {
       const payload = await fetchJson("/api/health");
-      const chunks = payload.knowledge_base?.chunk_count ?? 0;
-      setHealth("ok", `服务在线 · 资料 ${chunks} 条`);
+      void payload;
+      setHealth("ok", "已连接");
     } catch (error) {
       setHealth("error", `连接失败：${error.message}`);
     }
@@ -624,18 +1192,21 @@
       const nextSessionId = preferredExists ? preferredSessionId : state.sessions[0]?.id || null;
 
       renderSessions();
+      renderAccountPopover();
 
       if (nextSessionId) {
         await loadSession(nextSessionId, options);
       } else {
         state.activeSessionId = null;
         state.activeSession = null;
+        state.latestRouteRequest = "";
         renderMessages([]);
         updateSessionHeader();
       }
     } catch (error) {
       showToast(`会话加载失败：${error.message}`);
       renderSessions();
+      renderAccountPopover();
     }
   }
 
@@ -654,6 +1225,7 @@
       updateSessionHeader();
     }
     renderSessions();
+    renderAccountPopover();
   }
 
   function renderSessions() {
@@ -703,8 +1275,10 @@
       const payload = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
       state.activeSession = payload.session;
       state.activeSessionId = payload.session.id;
+      state.latestRouteRequest = "";
       localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
       renderSessions();
+      renderAccountPopover();
       renderMessages(payload.session.messages || []);
       updateSessionHeader();
       if (options.resetRuntime !== false) {
@@ -771,6 +1345,7 @@
         method: "DELETE",
       });
       state.activeSession = payload.session;
+      state.latestRouteRequest = "";
       renderMessages([]);
       updateSessionHeader();
       await loadSessions(state.activeSessionId);
@@ -835,6 +1410,10 @@
       return;
     }
 
+    await submitPreparedMessage(message, files);
+  }
+
+  async function submitPreparedMessage(message, files = []) {
     els.messageInput.value = "";
     resizeTextarea(els.messageInput);
     state.tripDraftDirty = false;
@@ -842,6 +1421,9 @@
     renderSelectedFiles();
 
     const displayText = files.length ? `${message || "已上传文件"}\n\n${files.map((file) => `- ${file.name}`).join("\n")}` : message;
+    if (isLikelyPlanningRequest(message) && !isRegenerateRequest(message)) {
+      state.latestRouteRequest = summarizeRequestText(message);
+    }
     appendMessage("user", displayText);
     rememberMessage("user", displayText);
     renderTripSummaryPanel();
@@ -862,6 +1444,45 @@
     } catch (error) {
       setBubbleContent(assistantBubble, "assistant", `请求失败：${error.message}`);
       showToast(`请求失败：${error.message}`);
+    } finally {
+      setBusy(false);
+      scrollMessagesToBottom();
+    }
+  }
+
+  async function regenerateItinerary() {
+    if (state.isBusy) {
+      return;
+    }
+    if (!state.activeSessionId && !state.latestItineraryMarkdown) {
+      showToast("先生成一次行程，再重新生成");
+      return;
+    }
+
+    const supplement = els.messageInput.value.trim();
+    const displayText = supplement
+      ? `按补充要求重新生成一版行程。\n补充要求：${supplement}`
+      : "重新生成一版不同的行程方案。";
+
+    els.messageInput.value = "";
+    resizeTextarea(els.messageInput);
+    appendMessage("user", displayText);
+    rememberMessage("user", displayText);
+    renderTripSummaryPanel();
+
+    const assistantBubble = appendMessage("assistant", "", true);
+    state.shouldAutoScroll = true;
+    scrollMessagesToBottom(true);
+    setBusy(true);
+    renderRuntime();
+    els.elapsedText.textContent = "正在重新生成";
+
+    try {
+      await sendRegenerateStreamingChat(supplement, assistantBubble);
+      await Promise.allSettled([refreshSessionSummaries(), refreshHealth(), refreshKnowledgeStatus()]);
+    } catch (error) {
+      setBubbleContent(assistantBubble, "assistant", `重新生成失败：${error.message}`);
+      showToast(`重新生成失败：${error.message}`);
     } finally {
       setBusy(false);
       scrollMessagesToBottom();
@@ -894,18 +1515,31 @@
     rememberMessage("assistant", payload.message || "");
     renderRuntime(payload.runtime);
     els.elapsedText.textContent = formatElapsed(payload.elapsed);
+    applyRouteUpdatesFromEvents(payload.events || []);
   }
 
   async function sendStreamingChat(message, assistantBubble) {
-    const response = await fetch(apiUrl("/api/chat/stream"), {
+    return sendStreamingRequest("/api/chat/stream", {
+      message,
+      session_id: state.activeSessionId,
+      model: getSelectedModel(),
+      save_to_session: true,
+    }, assistantBubble);
+  }
+
+  async function sendRegenerateStreamingChat(supplement, assistantBubble) {
+    return sendStreamingRequest("/api/chat/regenerate/stream", {
+      session_id: state.activeSessionId,
+      model: getSelectedModel(),
+      supplement: supplement || "",
+    }, assistantBubble);
+  }
+
+  async function sendStreamingRequest(endpoint, body, assistantBubble) {
+    const response = await fetchWithAuth(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message,
-        session_id: state.activeSessionId,
-        model: getSelectedModel(),
-        save_to_session: true,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -1030,6 +1664,10 @@
       return false;
     }
 
+    if (payload.type === "node_update" && payload.node === "router" && payload.state_update) {
+      applyRouteStateUpdate(payload.state_update);
+    }
+
     if (payload.type === "node_update" && payload.answer) {
       assistantBubble.dataset.streamText = payload.answer;
       setBubbleContent(assistantBubble, "assistant", payload.answer, { actions: false });
@@ -1046,6 +1684,26 @@
     }
 
     return false;
+  }
+
+  function applyRouteUpdatesFromEvents(events) {
+    if (!Array.isArray(events)) {
+      return;
+    }
+    events.forEach((event) => {
+      if (event?.type === "node_update" && event.node === "router" && event.state_update) {
+        applyRouteStateUpdate(event.state_update);
+      }
+    });
+  }
+
+  function applyRouteStateUpdate(update) {
+    const summary = buildRouteRequestSummary(update);
+    if (!summary) {
+      return;
+    }
+    state.latestRouteRequest = summary;
+    renderTripSummaryPanel();
   }
 
   function getSelectedModel() {
@@ -1095,27 +1753,48 @@
       return;
     }
     body.querySelector(".result-actions")?.remove();
-    if (!shouldRender || role !== "assistant" || !isItineraryContent(content)) {
+    if (!shouldRender || role !== "assistant") {
       return;
     }
 
-    state.latestItineraryMarkdown = content;
+    const itineraryContent = isItineraryContent(content);
+    const canRegenerateFromContext = Boolean(state.latestRouteRequest || itineraryContent || /行程|路线|景点|餐饮|交通|预算|Day\s*\d+/i.test(content));
+    if (!canRegenerateFromContext) {
+      return;
+    }
+    if (itineraryContent) {
+      state.latestItineraryMarkdown = content;
+    }
     renderTripSummaryPanel();
 
     const actions = document.createElement("div");
     actions.className = "result-actions";
 
-    const copyButton = document.createElement("button");
-    copyButton.type = "button";
-    copyButton.textContent = "复制";
-    copyButton.addEventListener("click", () => copyMarkdown(content));
+    if (itineraryContent) {
+      const copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.textContent = "复制";
+      copyButton.addEventListener("click", () => copyMarkdown(content));
 
-    const exportButton = document.createElement("button");
-    exportButton.type = "button";
-    exportButton.textContent = "导出 MD";
-    exportButton.addEventListener("click", () => exportMarkdown(content));
+      const exportButton = document.createElement("button");
+      exportButton.type = "button";
+      exportButton.textContent = "导出 MD";
+      exportButton.addEventListener("click", () => exportMarkdown(content));
 
-    actions.append(copyButton, exportButton);
+      actions.append(copyButton, exportButton);
+    }
+
+    const regenerateButton = document.createElement("button");
+    regenerateButton.type = "button";
+    regenerateButton.textContent = "重新生成";
+    regenerateButton.title = "基于当前会话上下文重新生成一版行程；输入框中的补充要求会一并带上";
+    regenerateButton.addEventListener("click", () => {
+      regenerateItinerary().catch((error) => {
+        showToast(`重新生成失败：${error.message}`);
+      });
+    });
+
+    actions.append(regenerateButton);
     body.appendChild(actions);
   }
 
@@ -1263,6 +1942,8 @@
       els.kbBadge.textContent = "连接失败";
       els.kbBadge.classList.remove("is-loaded");
       els.kbStatusText.textContent = error.message;
+      els.kbHintText.textContent = "请先确认后端服务已启动。";
+      setKnowledgeNotice(error.message, "error");
     }
   }
 
@@ -1274,6 +1955,18 @@
     els.kbStatusText.textContent = loaded
       ? `已收纳 ${count} 条资料片段，规划时会一起参考。`
       : "上传攻略、笔记或表格，规划时会一起参考。";
+    els.kbHintText.textContent = loaded ? "继续导入会合并到同一个知识库。" : "支持 PDF、DOCX、TXT、CSV 和小红书笔记链接。";
+  }
+
+  function setKnowledgeNotice(message, type = "info") {
+    if (!els.kbNoticeText) {
+      return;
+    }
+    const text = String(message || "").trim();
+    els.kbNoticeText.hidden = !text;
+    els.kbNoticeText.textContent = text;
+    els.kbNoticeText.classList.toggle("is-error", type === "error");
+    els.kbNoticeText.classList.toggle("is-success", type === "success");
   }
 
   async function uploadKnowledgeFiles(event) {
@@ -1289,19 +1982,64 @@
 
     els.uploadKbBtn.disabled = true;
     els.uploadKbBtn.textContent = "上传中...";
+    setKnowledgeNotice("");
     try {
       const payload = await fetchJson("/api/knowledge-base/files", {
         method: "POST",
         body: formData,
       });
       updateKnowledgeStatus(payload);
+      setKnowledgeNotice(payload.message || "知识库已更新", "success");
       showToast(payload.message || "知识库已更新");
       await refreshHealth();
     } catch (error) {
+      setKnowledgeNotice(error.message, "error");
       showToast(`知识库上传失败：${error.message}`);
     } finally {
       els.uploadKbBtn.disabled = false;
-      els.uploadKbBtn.textContent = "上传文档";
+      els.uploadKbBtn.textContent = "选择文件";
+    }
+  }
+
+  async function importXhsUrl() {
+    const url = (els.xhsUrlInput.value || "").trim();
+    if (!url) {
+      showToast("先粘贴一条小红书笔记链接");
+      els.xhsUrlInput.focus();
+      return;
+    }
+
+    const waitMs = state.xhsCooldownUntil - Date.now();
+    if (waitMs > 0) {
+      const waitSeconds = Math.ceil(waitMs / 1000);
+      setKnowledgeNotice(`小红书导入已进入保护间隔，请 ${waitSeconds} 秒后再试。`, "error");
+      showToast(`小红书导入保护中：${waitSeconds} 秒后再试`);
+      return;
+    }
+
+    els.importXhsBtn.disabled = true;
+    els.importXhsBtn.textContent = "导入中...";
+    state.xhsCooldownUntil = Date.now() + XHS_IMPORT_COOLDOWN_MS;
+    setKnowledgeNotice("");
+    try {
+      const payload = await fetchJson("/api/knowledge-base/xhs-url", {
+        method: "POST",
+        body: JSON.stringify({
+          url,
+          model: getSelectedModel(),
+        }),
+      });
+      updateKnowledgeStatus(payload);
+      els.xhsUrlInput.value = "";
+      setKnowledgeNotice(payload.message || "小红书笔记已导入", "success");
+      showToast(payload.message || "小红书笔记已导入");
+      await refreshHealth();
+    } catch (error) {
+      setKnowledgeNotice(error.message, "error");
+      showToast(`小红书导入失败：${error.message}`);
+    } finally {
+      els.importXhsBtn.disabled = false;
+      els.importXhsBtn.textContent = "导入链接";
     }
   }
 
@@ -1313,9 +2051,11 @@
     try {
       const payload = await fetchJson("/api/knowledge-base", { method: "DELETE" });
       updateKnowledgeStatus(payload);
+      setKnowledgeNotice(payload.message || "知识库已清空", "success");
       showToast(payload.message || "知识库已清空");
       await refreshHealth();
     } catch (error) {
+      setKnowledgeNotice(error.message, "error");
       showToast(`清空知识库失败：${error.message}`);
     }
   }
@@ -1546,6 +2286,48 @@
       return "未知时间";
     }
     return String(value).replace("T", " ").slice(0, 16);
+  }
+
+  function parseLocalDate(value) {
+    if (!value) {
+      return null;
+    }
+    const text = String(value).trim().replace("T", " ");
+    const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+    if (!match) {
+      return null;
+    }
+    const [, year, month, day, hour = "0", minute = "0", second = "0"] = match;
+    const date = new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    );
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  function dateKey(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function formatDaysSince(date) {
+    const today = new Date();
+    const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const days = Math.max(0, Math.floor((startOfToday - startOfDate) / 86400000));
+    if (days === 0) {
+      return "今天刚计划过旅行";
+    }
+    if (days === 1) {
+      return "你已经 1 天没有计划旅行了";
+    }
+    return `你已经 ${days} 天没有计划旅行了`;
   }
 
   function formatDuration(value) {

@@ -21,19 +21,24 @@ from core.llm_core import get_embeddings
 from utils import config
 
 
-def _cleanup_persist_path() -> None:
+def _resolve_persist_path(persist_path: str | None = None) -> str:
+    return persist_path or config.PERSIST_PATH
+
+
+def _cleanup_persist_path(persist_path: str | None = None) -> None:
     """尽量彻底清理向量库目录，避免损坏数据残留。"""
-    if not os.path.exists(config.PERSIST_PATH):
+    resolved_path = _resolve_persist_path(persist_path)
+    if not os.path.exists(resolved_path):
         return
 
     try:
-        shutil.rmtree(config.PERSIST_PATH)
+        shutil.rmtree(resolved_path)
         return
     except Exception:
         pass
 
-    for filename in os.listdir(config.PERSIST_PATH):
-        file_path = os.path.join(config.PERSIST_PATH, filename)
+    for filename in os.listdir(resolved_path):
+        file_path = os.path.join(resolved_path, filename)
         try:
             if os.path.isfile(file_path) or os.path.islink(file_path):
                 os.unlink(file_path)
@@ -123,12 +128,13 @@ def _build_loader(file_path: str, suffix: str):
     return None
 
 
-def load_db():
-    if not os.path.exists(config.PERSIST_PATH):
+def load_db(persist_path: str | None = None):
+    resolved_path = _resolve_persist_path(persist_path)
+    if not os.path.exists(resolved_path):
         return None
 
     try:
-        has_data = bool(os.listdir(config.PERSIST_PATH))
+        has_data = bool(os.listdir(resolved_path))
     except Exception:
         has_data = True
 
@@ -137,7 +143,7 @@ def load_db():
 
     try:
         vector_db = Chroma(
-            persist_directory=config.PERSIST_PATH,
+            persist_directory=resolved_path,
             embedding_function=get_embeddings(),
             collection_name="my_docs",
         )
@@ -149,17 +155,18 @@ def load_db():
             chromadb.api.client.SharedSystemClient.clear_system_cache()
         except Exception:
             pass
-        _cleanup_persist_path()
+        _cleanup_persist_path(resolved_path)
         return None
 
 
-def ingest_documents(uploaded_files, vector_db, selected_model):
+def ingest_documents(uploaded_files, vector_db, selected_model, persist_path: str | None = None):
     """
     uploaded_files: file-like objects with .name and .getbuffer()
     vector_db: 当前 Chroma 实例，可能为 None
     selected_model: 保留参数，便于后续扩展
     """
     del selected_model
+    resolved_path = _resolve_persist_path(persist_path)
 
     if not uploaded_files:
         return vector_db, {"success": False, "message": "没有检测到上传文件。"}
@@ -232,7 +239,7 @@ def ingest_documents(uploaded_files, vector_db, selected_model):
             documents=new_chunks,
             embedding=get_embeddings(),
             ids=new_ids,
-            persist_directory=config.PERSIST_PATH,
+            persist_directory=resolved_path,
             collection_name="my_docs",
         )
 
@@ -246,8 +253,9 @@ def ingest_documents(uploaded_files, vector_db, selected_model):
     }
 
 
-def clear_database(vector_db):
+def clear_database(vector_db, persist_path: str | None = None):
     """清空 Chroma 向量库及其持久化目录。"""
+    resolved_path = _resolve_persist_path(persist_path)
     if vector_db is not None:
         client = vector_db._client
 
@@ -269,13 +277,13 @@ def clear_database(vector_db):
         gc.collect()
         time.sleep(0.5)
 
-    if os.path.exists(config.PERSIST_PATH):
+    if os.path.exists(resolved_path):
         try:
-            shutil.rmtree(config.PERSIST_PATH)
+            shutil.rmtree(resolved_path)
             return True, "知识库及持久化目录已彻底删除。"
         except Exception:
-            for filename in os.listdir(config.PERSIST_PATH):
-                file_path = os.path.join(config.PERSIST_PATH, filename)
+            for filename in os.listdir(resolved_path):
+                file_path = os.path.join(resolved_path, filename)
                 try:
                     if os.path.isfile(file_path) or os.path.islink(file_path):
                         os.unlink(file_path)
