@@ -209,6 +209,13 @@
               </section>
 
               <div id="selectedFiles" class="selected-files" aria-live="polite"></div>
+              <div id="quickPrompts" class="quick-prompts" hidden>
+                <div class="quick-prompts-head">
+                  <h3>灵感模板</h3>
+                  <button id="shufflePromptBtn" class="ghost-button compact-button" type="button">换一换</button>
+                </div>
+                <div id="quickPromptList" class="quick-prompt-list" aria-live="polite"></div>
+              </div>
               <div class="composer-main">
                 <button id="attachBtn" class="icon-button" type="button" title="上传图片或语音" aria-label="上传图片或语音">
                   +
@@ -261,13 +268,6 @@
             </div>
             <div id="runtimePanelSummary" class="runtime-panel" role="tabpanel" aria-labelledby="runtimeTabSummary" data-runtime-panel="summary">
               <div id="tripSummaryPanel" class="trip-summary-panel"></div>
-            </div>
-            <div class="quick-prompts">
-              <div class="quick-prompts-head">
-                <h3>灵感模板</h3>
-                <button id="shufflePromptBtn" class="ghost-button compact-button" type="button">换一换</button>
-              </div>
-              <div id="quickPromptList" class="quick-prompt-list" aria-live="polite"></div>
             </div>
           </aside>
         </section>

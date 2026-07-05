@@ -1,13 +1,38 @@
 import asyncio
+import os
+import shutil
+from pathlib import Path
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-# 12306 MCP server 启动参数
-_12306_SERVER_PARAMS = StdioServerParameters(
-    command="node",
-    args=[r"c:\Users\KZI15PRO\Desktop\12306MCP\12306-mcp\build\index.js"],
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_12306_ENTRY = PROJECT_ROOT / "12306-mcp" / "build" / "index.js"
+
+
+def _get_node_command() -> str:
+    configured = os.getenv("TICKET_12306_NODE")
+    if configured:
+        return str(Path(configured).expanduser())
+    home = Path.home()
+    nvm_root = home / ".nvm" / "versions" / "node"
+    if nvm_root.exists():
+        candidates = sorted(nvm_root.glob("v*/bin/node"), reverse=True)
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+    return shutil.which("node") or "node"
+
+
+def _get_12306_server_params() -> StdioServerParameters:
+    entry = Path(os.getenv("TICKET_12306_MCP_ENTRY", str(DEFAULT_12306_ENTRY))).expanduser()
+    if not entry.exists():
+        raise FileNotFoundError(
+            "未找到 12306 MCP 构建文件："
+            f"{entry}。请先在项目根目录执行：cd 12306-mcp && npm install && npm run build"
+        )
+    return StdioServerParameters(command=_get_node_command(), args=[str(entry)])
 
 
 async def call_12306_tool(tool_name: str, arguments: dict) -> str:
@@ -17,7 +42,7 @@ async def call_12306_tool(tool_name: str, arguments: dict) -> str:
     arguments: 工具参数字典
     返回: 工具返回的文本内容
     """
-    async with stdio_client(_12306_SERVER_PARAMS) as (read, write):
+    async with stdio_client(_get_12306_server_params()) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments)

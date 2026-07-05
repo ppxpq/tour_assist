@@ -29,4 +29,5 @@ class TravelState(TypedDict, total=False):
     vector_db: Any
     tool_failures: list[dict]
     departure: str
+    companions: str
     

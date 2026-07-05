@@ -113,6 +113,65 @@ def _run_fetch_script(note_id: str, xsec_token: str, source_url: str) -> dict[st
     return payload
 
 
+def _resolve_project_path(value: str) -> Path:
+    path = Path(value or "").expanduser()
+    if not path.is_absolute():
+        path = Path(config.BASE_DIR) / path
+    return path
+
+
+def _run_xhs_downloader(source_url: str) -> dict[str, Any]:
+    project_path = _resolve_project_path(getattr(config, "XHS_DOWNLOADER_PATH", ""))
+    if not project_path.exists():
+        raise XhsImportError(f"未找到内嵌 XHS-Downloader：{project_path}")
+
+    script_path = Path(config.BASE_DIR) / "integrations" / "xhs_downloader_fetch.py"
+    if not script_path.exists():
+        raise XhsImportError("缺少小红书导入脚本 integrations/xhs_downloader_fetch.py。")
+
+    command = [
+        str(Path(config.BASE_DIR) / ".venv" / "bin" / "python"),
+        str(script_path),
+        "--project",
+        str(project_path),
+        "--url",
+        source_url,
+    ]
+    cookie = os.getenv("XHS_COOKIE", "").strip()
+    proxy = os.getenv("XHS_PROXY", "").strip()
+    if cookie:
+        command.extend(["--cookie", cookie])
+    if proxy:
+        command.extend(["--proxy", proxy])
+
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=35,
+            env={**os.environ, "NO_COLOR": "1"},
+        )
+    except FileNotFoundError as exc:
+        raise XhsImportError("未找到项目虚拟环境 Python，请先创建 .venv。") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise XhsImportError("XHS-Downloader 抓取超时，请稍后重试。") from exc
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    try:
+        payload = json.loads(stdout.splitlines()[-1]) if stdout else {}
+    except json.JSONDecodeError as exc:
+        raise XhsImportError(f"XHS-Downloader 返回异常：{stderr or stdout or exc}") from exc
+
+    if completed.returncode != 0 or not payload.get("success"):
+        message = payload.get("error") or stderr or "XHS-Downloader 抓取失败。"
+        raise XhsImportError(message)
+
+    return payload
+
+
 def _format_count(value: Any) -> str:
     text = str(value or "").strip()
     return text or "0"
@@ -185,6 +244,16 @@ def _normalize_note(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def fetch_xhs_note_as_text(url: str) -> dict[str, Any]:
+    backend = str(getattr(config, "XHS_IMPORT_BACKEND", "xhs_downloader") or "xhs_downloader").strip()
+    if backend == "xhs_downloader":
+        source_url = _resolve_url(url)
+        try:
+            payload = _run_xhs_downloader(source_url)
+            return _normalize_note(payload)
+        except XhsImportError:
+            if str(os.getenv("XHS_ALLOW_LEGACY_FALLBACK", "")).lower() not in {"1", "true", "yes", "on"}:
+                raise
+
     note_id, xsec_token, resolved_url = _parse_xhs_url(url)
     payload = _run_fetch_script(note_id, xsec_token, resolved_url)
     return _normalize_note(payload)

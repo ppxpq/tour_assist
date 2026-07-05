@@ -581,7 +581,7 @@ button {
 }
 
 .model-control {
-  display: flex;
+  display: none;
   align-items: center;
   gap: 8px;
   color: var(--ink-soft);
@@ -1175,6 +1175,7 @@ body.column-resizing {
 }
 
 .composer {
+  position: relative;
   border-top: 1px solid var(--line);
   background: var(--surface-soft);
   padding: 12px;
@@ -1223,12 +1224,27 @@ body.column-resizing {
 }
 
 .trip-builder-toggle small {
-  display: block;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
   max-width: 100%;
   overflow: hidden;
   color: var(--ink-soft);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.trip-builder-toggle small span {
+  display: inline-flex;
+  max-width: 160px;
+  min-height: 20px;
+  align-items: center;
+  padding: 0 7px;
+  overflow: hidden;
+  border: 1px solid rgba(13, 139, 117, 0.18);
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1671,6 +1687,7 @@ body.column-resizing {
 }
 
 .summary-actions,
+.guidance-actions,
 .result-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1678,6 +1695,7 @@ body.column-resizing {
 }
 
 .summary-actions button,
+.guidance-actions button,
 .result-actions button {
   min-height: 32px;
   padding: 0 10px;
@@ -1690,10 +1708,15 @@ body.column-resizing {
 }
 
 .summary-actions button:hover,
+.guidance-actions button:hover,
 .result-actions button:hover {
   border-color: var(--brand);
   background: var(--brand-soft);
   color: var(--brand-dark);
+}
+
+.guidance-actions {
+  margin-top: 8px;
 }
 
 .result-actions {
@@ -1701,9 +1724,20 @@ body.column-resizing {
 }
 
 .quick-prompts {
-  margin-top: auto;
-  padding: 16px;
-  border-top: 1px solid var(--line);
+  position: absolute;
+  right: 12px;
+  bottom: 62px;
+  z-index: 25;
+  width: min(360px, calc(100% - 24px));
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: var(--shadow);
+}
+
+.quick-prompts[hidden] {
+  display: none;
 }
 
 .quick-prompts-head {

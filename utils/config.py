@@ -33,7 +33,9 @@ MIMO_API_KEY = os.getenv("MIMO_API_KEY")
 MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
 
 # --- 小红书资料导入配置 ---
+XHS_DOWNLOADER_PATH = os.getenv("XHS_DOWNLOADER_PATH", str(BASE_DIR / "integrations" / "XHS-Downloader"))
 XHS_PROJECT_PATH = os.getenv("XHS_PROJECT_PATH", "/Users/heyining/xhs")
+XHS_IMPORT_BACKEND = os.getenv("XHS_IMPORT_BACKEND", "xhs_downloader")
 
 # --- Claude 代理配置 ---
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "sk-f040701f1a944bb8b239ad5ac096ef78")

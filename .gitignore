@@ -18,6 +18,20 @@ data/chroma_db/
 data/uploads/
 *.sqlite3
 *.sqlite3-*
+*.db
+
+# Embedded XHS-Downloader runtime data
+integrations/XHS-Downloader/runtime/
+integrations/XHS-Downloader/Volume/
+integrations/XHS-Downloader/settings.json
+
+# Embedded 12306 MCP build/runtime data
+12306-mcp/node_modules/
+12306-mcp/build/
+
+# Local npm cache/logs
+.npm-cache*/
+.npm-logs*/
 
 # Local tooling and OS noise
 .DS_Store

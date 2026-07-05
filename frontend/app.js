@@ -5,6 +5,7 @@
   const REFRESH_TOKEN_KEY = "travelAssistant.refreshToken";
   const AUTH_USER_KEY = "travelAssistant.authUser";
   const RUNTIME_WIDTH_KEY = "travelAssistant.runtimeWidth";
+  const SESSION_CACHE_PREFIX = "travelAssistant.sessionCache.";
   const ACTIVE_SESSION_KEY = "travelAssistant.activeSessionId";
   const TRIP_BUILDER_OPEN_KEY = "travelAssistant.tripBuilderOpen";
   const DEFAULT_API_BASE = "http://127.0.0.1:8000";
@@ -106,6 +107,9 @@
     tripDraftDirty: false,
     latestItineraryMarkdown: "",
     latestRouteRequest: "",
+    latestRuntime: null,
+    latestElapsedText: "",
+    quickPromptsOpen: false,
     quickPromptCursor: 0,
     xhsCooldownUntil: 0,
     accessToken: "",
@@ -157,6 +161,7 @@
     runtimeTabs: Array.from(document.querySelectorAll("[data-runtime-tab]")),
     runtimePanels: Array.from(document.querySelectorAll("[data-runtime-panel]")),
     tripSummaryPanel: document.getElementById("tripSummaryPanel"),
+    quickPrompts: document.getElementById("quickPrompts"),
     quickPromptList: document.getElementById("quickPromptList"),
     shufflePromptBtn: document.getElementById("shufflePromptBtn"),
     elapsedText: document.getElementById("elapsedText"),
@@ -271,6 +276,7 @@
     els.messageInput.addEventListener("input", () => {
       resizeTextarea(els.messageInput);
     });
+    els.messageInput.addEventListener("focus", () => setQuickPromptsOpen(true));
 
     els.messageList.addEventListener("scroll", () => {
       const distanceFromBottom = els.messageList.scrollHeight - els.messageList.scrollTop - els.messageList.clientHeight;
@@ -305,7 +311,11 @@
       }
       fillPrompt(button.getAttribute("data-prompt") || "");
     });
-    els.shufflePromptBtn.addEventListener("click", shuffleQuickPrompts);
+    els.shufflePromptBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      shuffleQuickPrompts();
+      setQuickPromptsOpen(true);
+    });
 
     els.sidebarToggleBtn.addEventListener("click", () => {
       els.sidebar.classList.toggle("open");
@@ -315,6 +325,11 @@
     initRuntimeTabs();
 
     document.addEventListener("click", (event) => {
+      const clickedPromptArea = els.quickPrompts?.contains(event.target) || els.messageInput.contains(event.target);
+      if (!clickedPromptArea) {
+        setQuickPromptsOpen(false);
+      }
+
       if (!els.sidebar.classList.contains("open")) {
         return;
       }
@@ -345,6 +360,16 @@
     els.messageInput.value = prompt;
     resizeTextarea(els.messageInput);
     els.messageInput.focus();
+    setQuickPromptsOpen(false);
+  }
+
+  function setQuickPromptsOpen(open) {
+    state.quickPromptsOpen = Boolean(open);
+    if (!els.quickPrompts) {
+      return;
+    }
+    els.quickPrompts.hidden = !state.quickPromptsOpen;
+    els.quickPrompts.classList.toggle("open", state.quickPromptsOpen);
   }
 
   function renderQuickPrompts() {
@@ -436,11 +461,17 @@
     if (draft.destination) {
       parts.push(draft.destination);
     }
+    if (draft.departure) {
+      parts.push(`${draft.departure}出发`);
+    }
     if (draft.days) {
       parts.push(draft.days);
     }
     if (draft.startDate) {
       parts.push(draft.startDate);
+    }
+    if (draft.arrivalMode) {
+      parts.push(draft.arrivalMode);
     }
     if (draft.travelers.length) {
       parts.push(draft.travelers.join("/"));
@@ -454,7 +485,9 @@
     if (draft.localMobility.length) {
       parts.push(draft.localMobility.slice(0, 2).join("/"));
     }
-    els.tripDraftSummary.textContent = parts.length ? parts.join(" · ") : "未选择标签，可直接聊天";
+    els.tripDraftSummary.innerHTML = parts.length
+      ? parts.map((part) => `<span>${escapeHtml(part)}</span>`).join("")
+      : "未选择标签，可直接聊天";
   }
 
   function renderTripSummaryPanel() {
@@ -465,8 +498,8 @@
     const draftItems = getTripDraftItems();
     const latestRouteRequest = getLatestRouteRequest();
     const latestTitle = getItineraryTitle(state.latestItineraryMarkdown);
-    const hasDraft = draftItems.some((item) => item.value !== "未指定");
-    const canRegenerate = Boolean(state.activeSessionId || latestRouteRequest || latestTitle);
+    const hasDraft = draftItems.length > 0;
+    const canRegenerate = Boolean(latestTitle);
 
     const draftHtml = hasDraft
       ? draftItems.map((item) => `
@@ -483,7 +516,7 @@
 
     const itineraryHtml = latestTitle
       ? `
-        <div class="summary-latest">
+          <div class="summary-latest">
           <span>最新行程</span>
           <strong>${escapeHtml(latestTitle)}</strong>
           <div class="summary-actions">
@@ -536,16 +569,16 @@
   function getTripDraftItems() {
     const draft = state.tripDraft;
     return [
-      { label: "目的地", value: draft.destination || "未指定" },
-      { label: "天数", value: draft.days || "未指定" },
-      { label: "出发日期", value: draft.startDate || "未指定" },
-      { label: "出发地", value: draft.departure || "未指定" },
-      { label: "到达方式", value: draft.arrivalMode || "未指定" },
-      { label: "同行", value: draft.travelers.join("、") || "未指定" },
-      { label: "偏好", value: draft.preferences.join("、") || "未指定" },
-      { label: "预算", value: draft.budget || "未指定" },
-      { label: "当地交通", value: draft.localMobility.join("、") || "未指定" },
-    ];
+      { label: "目的地", value: draft.destination },
+      { label: "天数", value: draft.days },
+      { label: "出发日期", value: draft.startDate },
+      { label: "出发地", value: draft.departure },
+      { label: "到达方式", value: draft.arrivalMode },
+      { label: "同行", value: draft.travelers.join("、") },
+      { label: "偏好", value: draft.preferences.join("、") },
+      { label: "预算", value: draft.budget },
+      { label: "当地交通", value: draft.localMobility.join("、") },
+    ].filter((item) => isMeaningfulSummaryValue(item.value));
   }
 
   function getLatestRouteRequest() {
@@ -572,16 +605,21 @@
   }
 
   function summarizeRequestText(text) {
-    const lines = String(text || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
+    const lines = String(text || "")
+      .split(/\n+/)
+      .map(cleanSummaryLine)
+      .filter(Boolean);
     return lines.slice(0, 6).join("\n");
   }
 
   function buildRouteRequestSummary(update = {}) {
     const intent = String(update.intent || "");
-    const city = String(update.city || "").trim();
+    const departure = cleanSummaryValue(update.departure);
+    const city = cleanSummaryValue(update.city);
+    const companions = cleanSummaryValue(update.companions);
     const days = Number(update.days || 0);
-    const startDate = String(update.start_date || "").trim();
-    const preference = String(update.preference || "").trim();
+    const startDate = cleanSummaryValue(update.start_date);
+    const preference = cleanSummaryValue(update.preference);
     const userQuery = String(update.user_query || "").trim();
 
     if (!["need_plan", "need_more_info"].includes(intent)) {
@@ -589,7 +627,14 @@
     }
 
     const parts = [];
-    parts.push(city ? `${city}${days > 0 ? ` ${days}日` : ""}` : days > 0 ? `${days}日行程` : "旅行规划");
+    if (departure && city) {
+      parts.push(`${departure}出发 -> ${city}${days > 0 ? ` ${days}日` : ""}`);
+    } else {
+      parts.push(city ? `${city}${days > 0 ? ` ${days}日` : ""}` : days > 0 ? `${days}日行程` : "旅行规划");
+    }
+    if (companions) {
+      parts.push(companions);
+    }
     if (startDate === "日期灵活") {
       parts.push("日期不定");
     } else if (startDate) {
@@ -597,11 +642,6 @@
     }
     if (preference) {
       parts.push(preference.replace(/\+/g, " / "));
-    }
-
-    const missing = Array.isArray(update.missing_fields) ? update.missing_fields : [];
-    if (missing.length) {
-      parts.push(`待补充：${missing.map(formatMissingField).join("、")}`);
     }
 
     const summary = parts.filter(Boolean).join(" · ");
@@ -613,11 +653,36 @@
 
   function formatMissingField(field) {
     return {
+      departure: "出发地",
       city: "目的地",
+      companions: "同行人",
       days: "天数",
       start_date: "出发日期",
       preference: "偏好",
     }[field] || field;
+  }
+
+  function cleanSummaryLine(line) {
+    const text = String(line || "").trim();
+    if (!text) {
+      return "";
+    }
+    const cleanedParts = text
+      .replace(/[。.]$/, "")
+      .split("；")
+      .map((part) => part.trim())
+      .filter((part) => !/[：:]\s*(未指定|空字符|空字符串|无|没有|无偏好|不限)\s*$/.test(part));
+    return cleanedParts.length ? `${cleanedParts.join("；")}。` : "";
+  }
+
+  function cleanSummaryValue(value) {
+    const text = String(value || "").trim();
+    return isMeaningfulSummaryValue(text) ? text : "";
+  }
+
+  function isMeaningfulSummaryValue(value) {
+    const text = String(value || "").trim();
+    return Boolean(text) && !["未指定", "空字符", "空字符串", "无", "没有", "无偏好", "不限"].includes(text);
   }
 
   function clearTripDraft() {
@@ -663,8 +728,15 @@
     ].filter(Boolean).join("，");
     lines.push(`${firstLine}。`);
 
-    if (draft.departure || draft.arrivalMode) {
-      lines.push(`出发地：${draft.departure || "未指定"}；到达方式：${draft.arrivalMode || "未指定"}。`);
+    const transferParts = [];
+    if (draft.departure) {
+      transferParts.push(`出发地：${draft.departure}`);
+    }
+    if (draft.arrivalMode) {
+      transferParts.push(`到达方式：${draft.arrivalMode}`);
+    }
+    if (transferParts.length) {
+      lines.push(`${transferParts.join("；")}。`);
     }
     if (draft.travelers.length) {
       lines.push(`同行人：${draft.travelers.join("、")}。`);
@@ -1200,7 +1272,11 @@
         state.activeSessionId = null;
         state.activeSession = null;
         state.latestRouteRequest = "";
+        state.latestItineraryMarkdown = "";
+        state.latestRuntime = null;
+        state.latestElapsedText = "";
         renderMessages([]);
+        renderRuntime();
         updateSessionHeader();
       }
     } catch (error) {
@@ -1246,7 +1322,7 @@
       contentButton.style.minWidth = "0";
       contentButton.style.cursor = "pointer";
       contentButton.innerHTML = `
-        <div class="session-title">${escapeHtml(session.title || "新会话")}</div>
+        <div class="session-title">${escapeHtml(sanitizeTitle(session.title) || "新会话")}</div>
         <div class="session-meta">${session.message_count || 0} 条消息 · ${formatDate(session.updated_at)}</div>
       `;
       contentButton.addEventListener("click", async () => {
@@ -1275,18 +1351,68 @@
       const payload = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
       state.activeSession = payload.session;
       state.activeSessionId = payload.session.id;
-      state.latestRouteRequest = "";
       localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
+      restoreSessionCache();
       renderSessions();
       renderAccountPopover();
       renderMessages(payload.session.messages || []);
       updateSessionHeader();
       if (options.resetRuntime !== false) {
-        renderRuntime();
+        renderRuntime(state.latestRuntime || undefined);
+        els.elapsedText.textContent = state.latestElapsedText || "还没有开始";
       }
       setBusy(state.isBusy);
     } catch (error) {
       showToast(`会话读取失败：${error.message}`);
+    }
+  }
+
+  function getSessionCacheKey(sessionId = state.activeSessionId) {
+    return sessionId ? `${SESSION_CACHE_PREFIX}${sessionId}` : "";
+  }
+
+  function persistSessionCache() {
+    const key = getSessionCacheKey();
+    if (!key) {
+      return;
+    }
+    const payload = {
+      latestRouteRequest: state.latestRouteRequest || "",
+      latestItineraryMarkdown: state.latestItineraryMarkdown || "",
+      latestRuntime: state.latestRuntime || null,
+      latestElapsedText: state.latestElapsedText || "",
+    };
+    localStorage.setItem(key, JSON.stringify(payload));
+  }
+
+  function restoreSessionCache() {
+    state.latestRouteRequest = "";
+    state.latestItineraryMarkdown = "";
+    state.latestRuntime = null;
+    state.latestElapsedText = "";
+
+    const key = getSessionCacheKey();
+    if (!key) {
+      return;
+    }
+    try {
+      const cached = JSON.parse(localStorage.getItem(key) || "null");
+      if (!cached || typeof cached !== "object") {
+        return;
+      }
+      state.latestRouteRequest = String(cached.latestRouteRequest || "");
+      state.latestItineraryMarkdown = String(cached.latestItineraryMarkdown || "");
+      state.latestRuntime = cached.latestRuntime && typeof cached.latestRuntime === "object" ? cached.latestRuntime : null;
+      state.latestElapsedText = String(cached.latestElapsedText || "");
+    } catch (error) {
+      localStorage.removeItem(key);
+    }
+  }
+
+  function clearSessionCache(sessionId = state.activeSessionId) {
+    const key = getSessionCacheKey(sessionId);
+    if (key) {
+      localStorage.removeItem(key);
     }
   }
 
@@ -1317,6 +1443,7 @@
       const payload = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         method: "DELETE",
       });
+      clearSessionCache(sessionId);
       const nextId = payload.current_session || null;
       state.activeSessionId = sessionId === state.activeSessionId ? nextId : state.activeSessionId;
       if (state.activeSessionId) {
@@ -1346,7 +1473,13 @@
       });
       state.activeSession = payload.session;
       state.latestRouteRequest = "";
+      state.latestItineraryMarkdown = "";
+      state.latestRuntime = null;
+      state.latestElapsedText = "";
+      clearSessionCache(state.activeSessionId);
       renderMessages([]);
+      renderRuntime();
+      els.elapsedText.textContent = "还没有开始";
       updateSessionHeader();
       await loadSessions(state.activeSessionId);
       showToast("当前会话已清空");
@@ -1357,7 +1490,7 @@
 
   function updateSessionHeader() {
     const session = state.activeSession;
-    els.activeSessionTitle.textContent = session?.title || "新会话";
+    els.activeSessionTitle.textContent = sanitizeTitle(session?.title) || "新会话";
     if (!session) {
       els.activeSessionMeta.textContent = "选择一条记录，继续完善路线";
       return;
@@ -1414,6 +1547,8 @@
   }
 
   async function submitPreparedMessage(message, files = []) {
+    setQuickPromptsOpen(false);
+    clearGuidanceActions();
     els.messageInput.value = "";
     resizeTextarea(els.messageInput);
     state.tripDraftDirty = false;
@@ -1423,6 +1558,7 @@
     const displayText = files.length ? `${message || "已上传文件"}\n\n${files.map((file) => `- ${file.name}`).join("\n")}` : message;
     if (isLikelyPlanningRequest(message) && !isRegenerateRequest(message)) {
       state.latestRouteRequest = summarizeRequestText(message);
+      persistSessionCache();
     }
     appendMessage("user", displayText);
     rememberMessage("user", displayText);
@@ -1432,6 +1568,8 @@
     scrollMessagesToBottom(true);
     setBusy(true);
     renderRuntime();
+    state.latestRuntime = null;
+    state.latestElapsedText = "";
     els.elapsedText.textContent = "正在整理路线";
 
     try {
@@ -1466,6 +1604,7 @@
 
     els.messageInput.value = "";
     resizeTextarea(els.messageInput);
+    setQuickPromptsOpen(false);
     appendMessage("user", displayText);
     rememberMessage("user", displayText);
     renderTripSummaryPanel();
@@ -1513,9 +1652,12 @@
     }
     setBubbleContent(assistantBubble, "assistant", payload.message || "没有返回可展示内容。");
     rememberMessage("assistant", payload.message || "");
+    state.latestRuntime = payload.runtime || state.latestRuntime;
+    state.latestElapsedText = formatElapsed(payload.elapsed);
     renderRuntime(payload.runtime);
     els.elapsedText.textContent = formatElapsed(payload.elapsed);
     applyRouteUpdatesFromEvents(payload.events || []);
+    persistSessionCache();
   }
 
   async function sendStreamingChat(message, assistantBubble) {
@@ -1569,7 +1711,6 @@
         if (event) {
           const payload = parseEventPayload(event);
           if (payload) {
-            sawFinal = handleStreamEvent(payload, assistantBubble) || sawFinal;
             if (payload.session_id) {
               state.activeSessionId = payload.session_id;
               localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
@@ -1577,6 +1718,7 @@
                 state.activeSession.id = state.activeSessionId;
               }
             }
+            sawFinal = handleStreamEvent(payload, assistantBubble) || sawFinal;
             if (payload.type === "final") {
               finalAnswer = payload.answer || finalAnswer;
             }
@@ -1593,7 +1735,6 @@
       const event = parseSseBlock(buffer);
       const payload = event ? parseEventPayload(event) : null;
       if (payload) {
-        sawFinal = handleStreamEvent(payload, assistantBubble) || sawFinal;
         if (payload.session_id) {
           state.activeSessionId = payload.session_id;
           localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId);
@@ -1601,6 +1742,7 @@
             state.activeSession.id = state.activeSessionId;
           }
         }
+        sawFinal = handleStreamEvent(payload, assistantBubble) || sawFinal;
         if (payload.type === "final") {
           finalAnswer = payload.answer || finalAnswer;
         }
@@ -1643,10 +1785,14 @@
 
   function handleStreamEvent(payload, assistantBubble) {
     if (payload.runtime) {
+      state.latestRuntime = payload.runtime;
       renderRuntime(payload.runtime);
+      persistSessionCache();
     }
     if (typeof payload.elapsed === "number") {
-      els.elapsedText.textContent = formatElapsed(payload.elapsed);
+      state.latestElapsedText = formatElapsed(payload.elapsed);
+      els.elapsedText.textContent = state.latestElapsedText;
+      persistSessionCache();
     }
 
     if (payload.type === "error") {
@@ -1679,6 +1825,7 @@
       assistantBubble.dataset.streamText = payload.answer || "";
       setBubbleContent(assistantBubble, "assistant", payload.answer || "没有返回可展示内容。");
       rememberMessage("assistant", payload.answer || "");
+      persistSessionCache();
       scrollMessagesToBottom();
       return true;
     }
@@ -1700,10 +1847,14 @@
   function applyRouteStateUpdate(update) {
     const summary = buildRouteRequestSummary(update);
     if (!summary) {
+      renderTripSummary();
+      renderTripSummaryPanel();
       return;
     }
     state.latestRouteRequest = summary;
+    renderTripSummary();
     renderTripSummaryPanel();
+    persistSessionCache();
   }
 
   function getSelectedModel() {
@@ -1741,10 +1892,77 @@
     const actions = options.actions !== false;
     const text = String(content || "");
     bubble.dataset.rawContent = pending ? "" : text;
+    const displayText = role === "assistant" && !pending ? stripGuidanceActionLine(text) : text;
     bubble.innerHTML = pending
       ? '<span class="typing" aria-label="正在输入"><span></span><span></span><span></span></span>'
-      : renderMarkdown(text);
+      : renderMarkdown(displayText);
+    renderGuidanceActions(bubble, role, text, actions && !pending);
     renderResultActions(bubble, role, text, actions && !pending);
+  }
+
+  function stripGuidanceActionLine(content) {
+    return String(content || "")
+      .split(/\n/)
+      .filter((line) => !/^\s*可选[：:]\s*(?:\[[^\]]+\]\s*)+$/.test(line))
+      .join("\n")
+      .trim();
+  }
+
+  function renderGuidanceActions(bubble, role, content, shouldRender) {
+    const body = bubble.parentElement;
+    if (!body) {
+      return;
+    }
+    body.querySelector(".guidance-actions")?.remove();
+    if (!shouldRender || role !== "assistant") {
+      return;
+    }
+    const actions = extractGuidanceActions(content);
+    if (!actions.length) {
+      return;
+    }
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "guidance-actions";
+    actions.forEach((action) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = action.label;
+      button.addEventListener("click", () => submitGuidanceAction(action.value));
+      wrapper.appendChild(button);
+    });
+    body.appendChild(wrapper);
+  }
+
+  function clearGuidanceActions() {
+    els.messageList.querySelectorAll(".guidance-actions").forEach((actions) => actions.remove());
+  }
+
+  function extractGuidanceActions(content) {
+    const text = String(content || "");
+    const matches = [...text.matchAll(/\[([^\]]{1,12})\]/g)]
+      .map((match) => match[1].trim())
+      .filter(Boolean);
+    const unique = [...new Set(matches)];
+    return unique.map((label) => {
+      if (label.startsWith("选") && label.length > 1) {
+        const city = label.slice(1);
+        return { label, value: `我选择${city}作为目的地。` };
+      }
+      if (label === "换一换") {
+        return { label, value: "换一换目的地推荐。" };
+      }
+      return { label, value: label };
+    });
+  }
+
+  function submitGuidanceAction(value) {
+    if (state.isBusy) {
+      return;
+    }
+    submitPreparedMessage(value, []).catch((error) => {
+      showToast(`发送失败：${error.message}`);
+    });
   }
 
   function renderResultActions(bubble, role, content, shouldRender) {
@@ -1758,14 +1976,12 @@
     }
 
     const itineraryContent = isItineraryContent(content);
-    const canRegenerateFromContext = Boolean(state.latestRouteRequest || itineraryContent || /行程|路线|景点|餐饮|交通|预算|Day\s*\d+/i.test(content));
-    if (!canRegenerateFromContext) {
+    if (!itineraryContent) {
       return;
     }
-    if (itineraryContent) {
-      state.latestItineraryMarkdown = content;
-    }
+    state.latestItineraryMarkdown = content;
     renderTripSummaryPanel();
+    persistSessionCache();
 
     const actions = document.createElement("div");
     actions.className = "result-actions";
@@ -1868,7 +2084,15 @@
 
   function getItineraryTitle(content) {
     const text = String(content || "");
-    return text.match(/^#\s+(.+)$/m)?.[1]?.trim() || "";
+    return sanitizeTitle(text.match(/^#\s+(.+)$/m)?.[1]?.trim() || "");
+  }
+
+  function sanitizeTitle(title) {
+    return String(title || "")
+      .replace(/\s*·\s*(?:空字符|空字符串|未指定|无偏好|无|没有|不限)\s*$/g, "")
+      .replace(/(?:空字符|空字符串)/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
   }
 
   function slugifyFilename(value) {
@@ -1882,7 +2106,6 @@
 
   function renderMessages(messages) {
     state.shouldAutoScroll = true;
-    state.latestItineraryMarkdown = "";
     els.messageList.innerHTML = "";
     if (!messages.length) {
       els.messageList.innerHTML = `

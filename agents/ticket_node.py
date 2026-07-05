@@ -187,6 +187,76 @@ _SEAT_RE = re.compile(
     r"(?P<status>剩余\d+张票|有票|无票|候补|--)\s*"
     r"(?P<price>\d+(?:\.\d+)?元)"
 )
+_CITY_PAIR_PATTERNS = (
+    re.compile(
+        r"(?:从|由)(?P<departure>[\u4e00-\u9fa5A-Za-z]{2,10})(?:出发)?"
+        r"(?:到|去|至|->|→)"
+        r"(?P<destination>[\u4e00-\u9fa5A-Za-z]{2,10})"
+    ),
+    re.compile(
+        r"(?P<departure>[\u4e00-\u9fa5A-Za-z]{2,10})"
+        r"(?:到|至|->|→)"
+        r"(?P<destination>[\u4e00-\u9fa5A-Za-z]{2,10})"
+    ),
+)
+_COMMON_STATION_NAMES = [
+    "北京", "上海", "广州", "深圳", "杭州", "南京", "苏州", "无锡", "常州", "扬州", "成都", "重庆",
+    "西安", "武汉", "长沙", "厦门", "青岛", "大连", "天津", "宁波", "福州", "泉州", "洛阳", "开封",
+    "南京南", "无锡东", "无锡新区", "上海虹桥", "杭州东", "苏州北",
+]
+
+
+def _strip_ticket_noise(value: str) -> str:
+    cleaned = re.sub(
+        r"(?:的)?(?:高铁票|动车票|火车票|列车票|车票|票|余票|查询|查一下|查|看看|预订|订|买|购买).*$",
+        "",
+        value or "",
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"(?:明天|后天|大后天|今天|周[一二三四五六日天]|星期[一二三四五六日天])", "", cleaned)
+    cleaned = re.sub(r"^(?:从|由)", "", cleaned)
+    return re.sub(r"[，。！？、,\s]", "", cleaned).strip()
+
+
+def _normalize_station_name(value: str) -> str:
+    cleaned = _strip_ticket_noise(value)
+    cleaned = re.sub(r"(?:出发地|目的地|到达地|出发站|到达站)[：:]", "", cleaned)
+    cleaned = re.sub(r"(?:车票信息|票务信息|查询结果|高铁|动车|火车|列车|车票|余票)$", "", cleaned)
+    cleaned = cleaned.strip()
+    for station in sorted(_COMMON_STATION_NAMES, key=len, reverse=True):
+        if station in cleaned:
+            return station
+    return cleaned[:10]
+
+
+def _parse_local_ticket_route(text: str) -> tuple[str, str]:
+    normalized = re.sub(r"\s+", "", text or "")
+    normalized = re.sub(r"^(?:帮我)?(?:查询|查一下|查|看看|看一下|买|购买|预订|订)", "", normalized)
+    for pattern in _CITY_PAIR_PATTERNS:
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        departure = _strip_ticket_noise(match.group("departure"))
+        destination = _strip_ticket_noise(match.group("destination"))
+        if departure and destination and departure != destination:
+            return departure[:10], destination[:10]
+    return "", ""
+
+
+def _parse_local_train_filter(text: str) -> str:
+    normalized = re.sub(r"\s+", "", text or "")
+    flags = []
+    if "高铁" in normalized or "城际" in normalized:
+        flags.append("G")
+    if "动车" in normalized:
+        flags.append("D")
+    if "直达" in normalized:
+        flags.append("Z")
+    if "特快" in normalized:
+        flags.append("T")
+    if "快速" in normalized or "普快" in normalized:
+        flags.append("K")
+    return "".join(dict.fromkeys(flags))
 
 
 def _clean_ticket_text(text: str) -> str:
@@ -305,27 +375,28 @@ def ticket_agent(state: TravelState) -> dict:
             ]
         }
 
-    # Use GLM-4-flash for parameter extraction
+    now = datetime.now()
+    local_date = _parse_local_ticket_date(user_input, today=now.date())
+    local_departure, local_destination = _parse_local_ticket_route(user_input)
+    local_train_filter = _parse_local_train_filter(user_input)
+    system_prompt = _TICKET_SYSTEM.format(today=now.strftime("%Y年%m月%d日"))
+
+    llm = None
     try:
         llm = get_llm("glm-4-flash")
     except Exception:
-        return {
-            "messages": [
-                AIMessage(content="车票查询服务暂时不可用，请稍后再试。")
-            ]
-        }
-
-    now = datetime.now()
-    local_date = _parse_local_ticket_date(user_input, today=now.date())
-    system_prompt = _TICKET_SYSTEM.format(today=now.strftime("%Y年%m月%d日"))
+        llm = None
 
     try:
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_input),
-        ])
-        raw_text = response.content if hasattr(response, "content") else str(response)
-        parsed = _safe_parse_json(raw_text)
+        if llm:
+            response = llm.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_input),
+            ])
+            raw_text = response.content if hasattr(response, "content") else str(response)
+            parsed = _safe_parse_json(raw_text)
+        else:
+            parsed = None
     except Exception:
         parsed = None
 
@@ -343,6 +414,13 @@ def ticket_agent(state: TravelState) -> dict:
         train_filter = str(parsed.get("train_filter", "") or "").strip().upper()
         need_transfer = bool(parsed.get("need_transfer", False))
 
+    if local_departure:
+        departure = local_departure
+    if local_destination:
+        destination = local_destination
+    if local_train_filter:
+        train_filter = local_train_filter
+
     # Supplement from state
     if not departure:
         departure = (state.get("departure") or "").strip()
@@ -352,6 +430,9 @@ def ticket_agent(state: TravelState) -> dict:
         date = local_date
     if not date:
         date = (state.get("start_date") or "").strip()
+
+    departure = _normalize_station_name(departure)
+    destination = _normalize_station_name(destination)
 
     # 根据出行方式设置车型筛选
     if not train_filter and travel_mode:

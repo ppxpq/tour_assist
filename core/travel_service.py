@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from agents.graph import build_travel_graph
+from agents.router_node import _fallback_parse_travel_request
 from core.db_manager import clear_database, ingest_documents, load_db
 from core.session_store import SessionStore
 from core.xhs_importer import XhsImportError, fetch_xhs_note_as_text
@@ -43,6 +44,7 @@ MEDIA_PATH_RE = re.compile(
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".webm"}
 LOW_QUALITY_TITLE_RE = re.compile(r"^(新会话|我想|帮我|请帮|查询|根据|用户上传)")
+TRAVEL_MODE_RE = re.compile(r"高铁|动车|火车|列车|自驾|租车|飞机|航班|打车|公共交通")
 
 
 @dataclass(slots=True)
@@ -69,6 +71,50 @@ def to_langchain_history(messages: Iterable[dict[str, str]]) -> list[BaseMessage
         elif role == "assistant":
             history.append(AIMessage(content=content))
     return history
+
+
+def _extract_travel_mode_from_history(messages: list[BaseMessage]) -> str:
+    for msg in reversed(messages[-10:]):
+        if not isinstance(msg, HumanMessage):
+            continue
+        text = str(getattr(msg, "content", "") or "")
+        if "高铁" in text or "动车" in text:
+            return "高铁"
+        if "火车" in text or "列车" in text:
+            return "火车"
+        if "自驾" in text or "租车" in text:
+            return "自驾"
+        if "飞机" in text or "航班" in text:
+            return "飞机"
+        if "打车" in text:
+            return "打车"
+        if "公共交通" in text:
+            return "公共交通"
+    return ""
+
+
+def _restore_context_slots(prompt: str, chat_history: list[BaseMessage]) -> dict[str, Any]:
+    messages = chat_history + [HumanMessage(content=prompt)]
+    try:
+        parsed = _fallback_parse_travel_request(prompt, {}, messages)
+    except Exception:
+        parsed = {}
+
+    restored: dict[str, Any] = {}
+    for key in ("departure", "city", "companions", "start_date", "preference"):
+        value = str(parsed.get(key) or "").strip()
+        if value:
+            restored[key] = value
+
+    days = int(parsed.get("days") or 0)
+    if days > 0:
+        restored["days"] = days
+
+    travel_mode = _extract_travel_mode_from_history(messages)
+    if travel_mode:
+        restored["travel_mode"] = travel_mode
+
+    return restored
 
 
 def _now_text() -> str:
@@ -246,9 +292,12 @@ def _public_state_update(node: str, update: dict[str, Any]) -> dict[str, Any]:
     if node == "router":
         return {
             "intent": str(update.get("intent") or ""),
+            "departure": str(update.get("departure") or ""),
             "city": str(update.get("city") or ""),
+            "companions": str(update.get("companions") or ""),
             "days": int(update.get("days") or 0),
             "start_date": str(update.get("start_date") or ""),
+            "travel_mode": str(update.get("travel_mode") or ""),
             "preference": str(update.get("preference") or ""),
             "missing_fields": list(update.get("missing_fields") or []),
             "user_query": str(update.get("user_query") or ""),
@@ -286,6 +335,52 @@ def _clean_title_part(text: str, limit: int = 8) -> str:
     cleaned = re.sub(r"\s+", "", text or "")
     cleaned = re.sub(r"[。！？；;，,].*$", "", cleaned)
     return cleaned[:limit]
+
+
+TITLE_PLACEHOLDER_CITY_WORDS = {
+    "哪里",
+    "哪儿",
+    "去哪",
+    "去哪儿",
+    "目的地",
+    "城市",
+    "地方",
+    "目的地灵活",
+}
+TITLE_FLEXIBLE_CITY_HINTS = (
+    "随便",
+    "都可以",
+    "都行",
+    "无所谓",
+    "没定",
+    "未定",
+    "不确定",
+    "还没确定",
+    "推荐",
+    "帮我选",
+    "你定",
+)
+
+
+def _is_placeholder_title_city(text: str) -> bool:
+    cleaned = _clean_title_part(text, 12)
+    if not cleaned:
+        return True
+    normalized = re.sub(r"(吧|啊|呀|呢|嘛|啦|了)$", "", cleaned)
+    if normalized in TITLE_PLACEHOLDER_CITY_WORDS:
+        return True
+    if normalized.startswith(("去哪里", "去哪儿", "去哪")):
+        return True
+    if any(word in normalized for word in TITLE_PLACEHOLDER_CITY_WORDS) and any(
+        hint in normalized for hint in TITLE_FLEXIBLE_CITY_HINTS
+    ):
+        return True
+    return False
+
+
+def _clean_title_city(text: str, limit: int = 8) -> str:
+    cleaned = _clean_title_part(text, limit)
+    return "" if _is_placeholder_title_city(cleaned) else cleaned
 
 
 CN_NUMBER_MAP = {
@@ -331,6 +426,7 @@ def _extract_trip_title(prompt: str, current_title: str = "") -> str:
         return ""
 
     old_city, old_days, old_theme = _extract_current_title_parts(current_title)
+    old_city = _clean_title_city(old_city, 8)
 
     city = ""
     for pattern in (
@@ -343,8 +439,9 @@ def _extract_trip_title(prompt: str, current_title: str = "") -> str:
     ):
         match = re.search(pattern, text)
         if match:
-            city = _clean_title_part(match.group(1), 6)
-            break
+            city = _clean_title_city(match.group(1), 6)
+            if city:
+                break
     city = city or old_city
 
     days = ""
@@ -368,16 +465,17 @@ def _extract_trip_title(prompt: str, current_title: str = "") -> str:
     days = days or old_days
 
     theme = ""
+    empty_title_words = {"未指定", "空字符", "空字符串", "无", "没有", "不限"}
     preference_match = re.search(r"偏好[：:\s]*([^\n。]+)", text)
     if preference_match:
         raw_items = re.split(r"[、,+，,\s]+", preference_match.group(1))
-        theme = "".join(_clean_title_part(item, 3) for item in raw_items if item and item != "未指定")[:8]
+        theme = "".join(_clean_title_part(item, 3) for item in raw_items if item and item not in empty_title_words)[:8]
 
     if not theme:
         travelers_match = re.search(r"同行人[：:\s]*([^\n。]+)", text)
         if travelers_match:
             raw_items = re.split(r"[、,+，,\s]+", travelers_match.group(1))
-            theme = "".join(_clean_title_part(item, 3) for item in raw_items if item and item != "未指定")[:8]
+            theme = "".join(_clean_title_part(item, 3) for item in raw_items if item and item not in empty_title_words)[:8]
 
     if not theme:
         preference_words = ("美食", "人文", "自然", "摄影", "休闲", "小众", "省钱", "购物", "夜游", "亲子", "家庭", "老人")
@@ -415,14 +513,15 @@ def _is_low_quality_title(title: str) -> bool:
 
 
 def _compact_title_theme(preference: str) -> str:
-    parts = [part for part in re.split(r"[、,+，,\s]+", preference or "") if part and part not in {"综合", "未指定"}]
+    empty_words = {"综合", "未指定", "空字符", "空字符串", "无", "没有", "无偏好", "不限"}
+    parts = [part for part in re.split(r"[、,+，,\s]+", preference or "") if part and part not in empty_words]
     return "".join(_clean_title_part(part, 3) for part in parts)[:8]
 
 
 def _build_title_from_node_update(node: str, update: dict[str, Any]) -> str:
     if node == "router":
         intent = str(update.get("intent") or "").strip().lower()
-        city = _clean_title_part(str(update.get("city") or ""), 8)
+        city = _clean_title_city(str(update.get("city") or ""), 8)
         days = int(update.get("days") or 0)
         preference = _compact_title_theme(str(update.get("preference") or ""))
 
@@ -636,11 +735,13 @@ class TravelService:
     ) -> dict[str, Any]:
         with self._vector_lock:
             vector_db = self._get_vector_db_locked(user_id)
+        restored_slots = _restore_context_slots(prompt, chat_history)
         return {
             "messages": chat_history + [HumanMessage(content=prompt)],
             "router_model": ROUTER_MODEL,
             "planner_model": model or DEFAULT_MODEL,
             "vector_db": vector_db,
+            **restored_slots,
         }
 
     def iter_graph_events(
